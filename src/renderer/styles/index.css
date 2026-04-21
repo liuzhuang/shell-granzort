@@ -1,0 +1,221 @@
+:root {
+  --font-ui: "Nunito Sans", -apple-system, system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Geist Mono", "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+
+  --bg: #1a1a1a;
+  --panel: #1a1a1a;
+  --panel-soft: #2a2a2a;
+  --surface: #2a2a2a;
+  --text: #f0f0f0;
+  --muted: #a0a0a0;
+  --text-dim: #8a8a8a;
+  --border-subtle: #2a2a2a;
+  --border-default: #3a3a3a;
+  --border-strong: #4a4a4a;
+  --accent: #ff385c;
+  --accent-strong: #e00b41;
+  --accent-soft: rgba(255, 56, 92, 0.14);
+  --focus-ring: #f0f0f0;
+  --shadow-card: rgba(0, 0, 0, 0.02) 0px 0px 0px 1px, rgba(0, 0, 0, 0.04) 0px 2px 6px, rgba(0, 0, 0, 0.1) 0px 4px 8px;
+  --shadow-hover: rgba(0, 0, 0, 0.08) 0px 4px 12px;
+
+  --run: #428bff;
+  --warn: #f59e0b;
+  --err: #c13515;
+  --idle: #a0a0a0;
+  --ok: #22c55e;
+
+  /* CodeMirror YAML — VS Code Dark+ 风格 */
+  --cm-yaml-fg: #d4d4d4;
+  --cm-yaml-key: #9cdcfe;
+  --cm-yaml-string: #ce9178;
+  --cm-yaml-plain: #d4d4d4;
+  --cm-yaml-number: #b5cea8;
+  --cm-yaml-bool: #569cd6;
+  --cm-yaml-comment: #6a9955;
+  --cm-yaml-punct: #808080;
+  --cm-yaml-bracket: #ffd700;
+  --cm-yaml-anchor: #dcdcaa;
+  --cm-yaml-tag: #4ec9b0;
+  --cm-yaml-meta: #569cd6;
+  --cm-yaml-directive: #ce9178;
+  --cm-yaml-gutter-fg: #858585;
+  --cm-yaml-gutter-bg: #1e1e1e;
+}
+
+:root[data-theme="light"] {
+  /* VS Code Light+ 风格 */
+  --cm-yaml-fg: #000000;
+  --cm-yaml-key: #0451a5;
+  --cm-yaml-string: #a31515;
+  --cm-yaml-plain: #000000;
+  --cm-yaml-number: #098658;
+  --cm-yaml-bool: #0000ff;
+  --cm-yaml-comment: #008000;
+  --cm-yaml-punct: #383838;
+  --cm-yaml-bracket: #0431fa;
+  --cm-yaml-anchor: #811f3f;
+  --cm-yaml-tag: #267f99;
+  --cm-yaml-meta: #0000ff;
+  --cm-yaml-directive: #a31515;
+  --cm-yaml-gutter-fg: #237893;
+  --cm-yaml-gutter-bg: #f3f3f3;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-ui);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.45;
+}
+
+button,
+input,
+textarea {
+  transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease, transform 120ms ease;
+}
+
+button:hover {
+  border-color: var(--border-strong);
+}
+
+button:active {
+  transform: scale(0.98);
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--focus-ring);
+}
+
+/* 全局隐藏滚动条，仍可通过滚轮/触控板/键盘滚动 */
+html,
+body,
+#root {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+#root::-webkit-scrollbar,
+*::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+@keyframes presetPulse {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  70% {
+    transform: scale(1.02);
+    box-shadow: 0 0 0 12px color-mix(in srgb, var(--accent) 0%, transparent);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 0%, transparent);
+  }
+}
+
+.card-footer {
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.panel-card:hover .card-footer {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.system-ticker {
+  width: 100%;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+  opacity: 0.72;
+}
+
+.system-ticker-viewport {
+  width: 100%;
+  overflow: hidden;
+  padding: 4px 8px;
+  height: 22px;
+}
+
+.system-ticker-track-vertical {
+  display: flex;
+  flex-direction: column;
+  will-change: transform;
+  transform: translateY(0);
+  transition: transform 220ms ease;
+}
+
+.system-ticker-track-vertical.is-animating {
+  transform: translateY(-22px);
+}
+
+.system-ticker-line {
+  height: 22px;
+  line-height: 22px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.system-ticker-static {
+  padding: 4px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.system-ticker--compact {
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.system-ticker--compact .system-ticker-viewport {
+  padding: 3px 4px;
+  height: 20px;
+}
+
+.system-ticker--compact .system-ticker-track-vertical.is-animating {
+  transform: translateY(-20px);
+}
+
+.system-ticker--compact .system-ticker-line {
+  height: 20px;
+  line-height: 20px;
+}
+
+.system-ticker--compact .system-ticker-static {
+  padding: 3px 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .system-ticker-track-vertical {
+    transition: none;
+  }
+}
