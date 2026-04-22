@@ -369,11 +369,9 @@ export function registerIpcHandlers(
     return { instances }
   })
 
-  ipcMain.handle('terminal:stop', (_e, commandName: string, options?: { sessionId?: string }) => {
-    const sessionId = options?.sessionId?.trim() || undefined
-    const sessionKey = resolveTerminalSessionKey(commandName, sessionId)
+  const killTerminalSessionBySessionKey = (sessionKey: string): void => {
     const session = terminalMap.get(sessionKey)
-    if (!session) return { ok: true }
+    if (!session) return
     const pty = session.pty
     const pid = pty.pid
     let exited = false
@@ -388,7 +386,24 @@ export function registerIpcHandlers(
     void terminateProcessTreeWithEscalation(pid, () => exited || terminalMap.get(sessionKey)?.pty !== pty, 900).finally(() =>
       disposable.dispose()
     )
+  }
+
+  ipcMain.handle('terminal:stop', (_e, commandName: string, options?: { sessionId?: string }) => {
+    const sessionId = options?.sessionId?.trim() || undefined
+    const sessionKey = resolveTerminalSessionKey(commandName, sessionId)
+    killTerminalSessionBySessionKey(sessionKey)
     return { ok: true }
+  })
+
+  /** 停止该配置命令名下所有 PTY（默认槽 + 各 Pane session），供首页「停止运行」等使用 */
+  ipcMain.handle('terminal:stop-all-for-command', (_e, commandName: string) => {
+    const target = commandName.trim()
+    if (!target) return { ok: true, stopped: 0 }
+    const keys = [...terminalMap.entries()].filter(([, s]) => s.commandName === target).map(([k]) => k)
+    for (const sessionKey of keys) {
+      killTerminalSessionBySessionKey(sessionKey)
+    }
+    return { ok: true, stopped: keys.length }
   })
 
   ipcMain.handle('system:open-external', async (_e, url: string) => {

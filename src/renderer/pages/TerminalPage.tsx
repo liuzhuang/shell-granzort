@@ -22,26 +22,23 @@ export function TerminalPage({
   onBack: () => void
   onActionError: (message: string) => void
 }) {
-  const restoredFromCacheRef = useRef(Boolean(terminalPageCache))
   const actionErrorRef = useRef(onActionError)
   const experimentalEnabledRef = useRef(false)
   const insightTimerRef = useRef<number | null>(null)
-  const [tabs, setTabs] = useState<TerminalTabState[]>(() => {
-    if (terminalPageCache?.tabs?.length) return terminalPageCache.tabs
-    return [createTab('会话 1', commandName || '')]
-  })
-  const [activeTabId, setActiveTabId] = useState<string>(() => {
-    if (terminalPageCache?.activeTabId) return terminalPageCache.activeTabId
-    return tabs[0]?.id || ''
-  })
-  const [experimentalEnabled, setExperimentalEnabled] = useState(() => terminalPageCache?.experimentalEnabled || false)
+  const initialTerminalRef = useRef<ReturnType<typeof resolveInitialTerminalState> | null>(null)
+  if (initialTerminalRef.current === null) {
+    initialTerminalRef.current = resolveInitialTerminalState(commandName)
+  }
+  const [tabs, setTabs] = useState<TerminalTabState[]>(() => initialTerminalRef.current!.tabs)
+  const [activeTabId, setActiveTabId] = useState<string>(() => initialTerminalRef.current!.activeTabId)
+  const [experimentalEnabled, setExperimentalEnabled] = useState(() => initialTerminalRef.current!.experimentalEnabled)
   const [observerPreview, setObserverPreview] = useState('')
   const [insight, setInsight] = useState('尚未生成洞察。')
   const [insightError, setInsightError] = useState('')
   const [insightLoading, setInsightLoading] = useState(false)
   const [insightUpdatedAt, setInsightUpdatedAt] = useState<number | null>(null)
   const [sessionStateBySessionId, setSessionStateBySessionId] = useState<Record<string, 'running' | 'idle'>>(
-    () => terminalPageCache?.sessionStateBySessionId || {}
+    () => initialTerminalRef.current!.sessionStateBySessionId
   )
   const [isLightTheme, setIsLightTheme] = useState<boolean>(() => {
     if (typeof document === 'undefined') return false
@@ -89,18 +86,31 @@ export function TerminalPage({
   }, [])
 
   useEffect(() => {
-    if (!commandName || !activeTab || restoredFromCacheRef.current) return
+    if (!commandName || !activeTab) return
+    const currentPane = activeTab.panes.find((pane) => pane.id === activeTab.activePaneId)
+    if (!currentPane) return
+    if (currentPane.commandName === commandName) return
+
+    // 外部命令切换时必须切新会话，避免复用旧 sessionId 导致串台。
+    if (currentPane.commandName && currentPane.sessionId) {
+      void window.api.terminalStop(currentPane.commandName, { sessionId: currentPane.sessionId })
+    }
+    const nextSessionId = tabsafeId('session')
+    setSessionStateBySessionId((prev) => {
+      const next = { ...prev }
+      if (currentPane.sessionId) delete next[currentPane.sessionId]
+      return next
+    })
     setTabs((prev) =>
       prev.map((tab) => {
         if (tab.id !== activeTab.id) return tab
-        const nextPanes = [...tab.panes]
-        const activeIndex = nextPanes.findIndex((pane) => pane.id === tab.activePaneId)
-        if (activeIndex < 0) return tab
-        nextPanes[activeIndex] = { ...nextPanes[activeIndex], commandName }
+        const nextPanes = tab.panes.map((pane) =>
+          pane.id === tab.activePaneId ? { ...pane, commandName, sessionId: nextSessionId } : pane
+        )
         return { ...tab, panes: nextPanes }
       })
     )
-  }, [commandName, activeTab?.id])
+  }, [commandName, activeTab])
 
   useEffect(() => {
     terminalPageCache = {
@@ -344,6 +354,7 @@ export function TerminalPage({
               {experimentalEnabled ? '关闭 AI 洞察（实验）' : 'AI 洞察（实验）'}
             </button>
             <button
+              data-testid="terminal-stop-session"
               style={buttonStyle('warn')}
               onClick={async () => {
                 if (!activeCommand || !activePane?.sessionId) return
@@ -488,35 +499,24 @@ export function TerminalPage({
                       }}
                     >
                       <span style={{ fontSize: 12, color: shellTextColor }}>Pane</span>
-                      <select
-                        value={pane.commandName}
-                        onChange={(event) => {
-                          const nextName = event.target.value
-                          if (pane.commandName && pane.sessionId) {
-                            void window.api.terminalStop(pane.commandName, { sessionId: pane.sessionId })
-                          }
-                          const nextSessionId = tabsafeId('session')
-                          setSessionStateBySessionId((prev) => {
-                            const next = { ...prev }
-                            if (pane.sessionId) delete next[pane.sessionId]
-                            return next
-                          })
-                          updateActiveTab((tab) => ({
-                            ...tab,
-                            panes: tab.panes.map((item) =>
-                              item.id === pane.id ? { ...item, commandName: nextName, sessionId: nextSessionId } : item
-                            )
-                          }))
+                      <span
+                        title="当前命令由命令列表选定，此处不可切换"
+                        style={{
+                          ...shellControlStyle,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          minHeight: 28,
+                          cursor: 'default',
+                          userSelect: 'text',
+                          flexShrink: 0,
+                          maxWidth: 'min(420px, 100%)',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap'
                         }}
-                        style={shellControlStyle}
                       >
-                        <option value="">请选择命令</option>
-                        {commands.map((item) => (
-                          <option key={item.name} value={item.name}>
-                            {item.name}
-                          </option>
-                        ))}
-                      </select>
+                        {pane.commandName || '未绑定命令'}
+                      </span>
                       <span style={{ marginLeft: 'auto', fontSize: 11, ...shellMetaTextStyle }}>
                         {pane.commandName
                           ? sessionStateBySessionId[pane.sessionId] === 'running'
@@ -732,18 +732,33 @@ function TerminalPane({
         terminal.write(`\r\n\r\n[会话已结束，状态码 (Exit Code) ${payload.exitCode}]\r\n`)
       }
     })
-    void window.api
-      .terminalStart(commandName, { sessionId })
-      .then((result) => {
+    /** 首页「打开窗口」会占用无 sessionId 的默认槽；进入交互页再启 Pane 会形成双 PTY，仅终止 Pane 时列表仍显示运行中。 */
+    let disposed = false
+    const startSession = async () => {
+      try {
+        await window.api.terminalStop(commandName)
+      } catch {
+        /* 无默认槽时忽略 */
+      }
+      if (disposed) return
+      try {
+        const result = await window.api.terminalStart(commandName, { sessionId })
+        if (disposed) return
         if (result.buffer) terminal.write(result.buffer)
         onStatusRef.current(result.state || 'running')
         if ((result.state || 'running') === 'running') {
           void window.api.terminalResize(commandName, terminal.cols, terminal.rows, { sessionId })
         }
-      })
-      .catch((error) => onActionErrorRef.current(error instanceof Error ? error.message : String(error)))
+      } catch (error) {
+        if (!disposed) {
+          onActionErrorRef.current(error instanceof Error ? error.message : String(error))
+        }
+      }
+    }
+    void startSession()
 
     return () => {
+      disposed = true
       inputDisposable.dispose()
       offData?.()
       offObserver?.()
@@ -804,6 +819,35 @@ function createTab(title: string, initialCommand: string): TerminalTabState {
     layout: 'single',
     panes: [firstPane],
     activePaneId: firstPane.id
+  }
+}
+
+/** 恢复缓存前校验当前入口命令与活动 Pane 一致，避免二次进入时沿用旧命令导致串台。 */
+function resolveInitialTerminalState(incomingCommand: string): {
+  tabs: TerminalTabState[]
+  activeTabId: string
+  experimentalEnabled: boolean
+  sessionStateBySessionId: Record<string, 'running' | 'idle'>
+} {
+  const cache = terminalPageCache
+  if (cache?.tabs?.length) {
+    const tab = cache.tabs.find((t) => t.id === cache.activeTabId) || cache.tabs[0]
+    const pane = tab?.panes.find((p) => p.id === tab.activePaneId) || tab?.panes[0]
+    if (pane && (!incomingCommand || pane.commandName === incomingCommand)) {
+      return {
+        tabs: cache.tabs,
+        activeTabId: cache.activeTabId,
+        experimentalEnabled: cache.experimentalEnabled,
+        sessionStateBySessionId: { ...cache.sessionStateBySessionId }
+      }
+    }
+  }
+  const first = createTab('会话 1', incomingCommand || '')
+  return {
+    tabs: [first],
+    activeTabId: first.id,
+    experimentalEnabled: cache?.experimentalEnabled || false,
+    sessionStateBySessionId: {}
   }
 }
 

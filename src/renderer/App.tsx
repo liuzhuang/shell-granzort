@@ -132,6 +132,24 @@ export default function App() {
     setTickerEvents((prev) => [...prev, normalized].slice(-TICKER_EVENT_LIMIT))
   }, [])
 
+  /** 终端页 Pane 带 sessionId，状态广播曾被忽略；按主进程实例列表汇总，避免首页卡片停在「运行中」。 */
+  const syncTerminalStatusFromInstances = useCallback(async () => {
+    const terminalNames = config.commands.filter((c) => (c.mode || 'service') === 'terminal').map((c) => c.name)
+    if (terminalNames.length === 0) return
+    try {
+      const { instances } = await window.api.terminalListInstances()
+      setTerminalStatusMap((prev) => {
+        const next = { ...prev }
+        for (const name of terminalNames) {
+          next[name] = instances.some((i) => i.commandName === name) ? 'running' : 'idle'
+        }
+        return next
+      })
+    } catch {
+      /* ignore */
+    }
+  }, [config.commands])
+
   function notify(text: string, tone: ToastTone = 'info') {
     pushTickerEvent(text)
     setToast({ text, tone })
@@ -372,7 +390,8 @@ export default function App() {
       .terminalGetInstanceCount()
       .then((payload) => setTerminalInstanceCount(payload.count))
       .catch(() => setTerminalInstanceCount(0))
-  }, [])
+    void syncTerminalStatusFromInstances()
+  }, [syncTerminalStatusFromInstances])
 
   useEffect(() => {
     window.api.onConfigError(({ error }) => {
@@ -389,18 +408,14 @@ export default function App() {
     window.api.onPresetProgress((payload) => {
       setPresetProgress(payload)
     })
-    window.api.onTerminalStatus((payload) => {
+    window.api.onTerminalStatus(() => {
       void window.api
         .terminalGetInstanceCount()
         .then((result) => setTerminalInstanceCount(result.count))
         .catch(() => {})
-      if (payload.sessionId) return
-      setTerminalStatusMap((prev) => ({
-        ...prev,
-        [payload.commandName]: payload.state
-      }))
+      void syncTerminalStatusFromInstances()
     })
-  }, [config.commands, pushTickerEvent])
+  }, [config.commands, pushTickerEvent, syncTerminalStatusFromInstances])
 
   useEffect(() => {
     applyThemePreset(themePreset)
@@ -498,6 +513,7 @@ export default function App() {
             setSelectedCommand(name)
             setPage('terminal')
           }}
+          onMarkActiveCommand={(name) => setSelectedCommand(name)}
           onOpenContextMenu={(payload) => {
             setContextMenu(payload)
           }}
@@ -767,25 +783,41 @@ function buildMenuItems(params: {
     {
       key: 'run',
       label: commandConfig?.mode === 'terminal' ? (terminalRunning ? '进入终端窗口' : '开启新终端') : '启动任务',
-      group: '快捷操作',
+      group: '快捷运行',
       onClick: async () => {
         try {
           setSelectedCommand(commandName)
           if (commandConfig?.mode === 'terminal') {
-            setPage('terminal')
+            if (terminalRunning) {
+              setPage('terminal')
+              return
+            }
+            await window.api.terminalStart(commandName)
             return
           }
           await window.api.processStart(commandName)
-          setPage('log')
         } catch (error) {
           notify(`指令执行失败：${error instanceof Error ? error.message : String(error)}`, 'error')
         }
       }
     },
+    ...(commandConfig?.mode === 'terminal'
+      ? []
+      : [
+          {
+            key: 'view-log',
+            label: '查看运行日志',
+            group: '快捷运行',
+            onClick: () => {
+              setSelectedCommand(commandName)
+              setPage('log')
+            }
+          } satisfies ContextMenuItem
+        ]),
     {
       key: 'open-web',
       label: '打开网站',
-      group: '快捷操作',
+      group: '快捷运行',
       onClick: async () => {
         if (!webUrl) {
           notify('未检测到该命令的 Web 地址。请在配置中添加 webUrl。', 'warn')
@@ -801,10 +833,10 @@ function buildMenuItems(params: {
     {
       key: 'stop',
       label: '强制停止',
-      group: '快捷操作',
+      group: '快捷运行',
       onClick: async () => {
         try {
-          if (commandConfig?.mode === 'terminal') await window.api.terminalStop(commandName)
+          if (commandConfig?.mode === 'terminal') await window.api.terminalStopAllForCommand(commandName)
           else await window.api.processStop(commandName)
         } catch (error) {
           notify(`指令执行失败：${error instanceof Error ? error.message : String(error)}`, 'error')
@@ -818,7 +850,7 @@ function buildMenuItems(params: {
           {
             key: 'restart',
             label: '立即重启',
-            group: '快捷操作',
+            group: '快捷运行',
             onClick: async () => {
               try {
                 await window.api.processRestart(commandName)

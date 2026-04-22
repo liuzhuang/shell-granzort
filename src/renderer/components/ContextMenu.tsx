@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 export interface ContextMenuItem {
   key: string
@@ -31,11 +31,61 @@ export function ContextMenu({
     return acc
   }, {})
   const orderedGroups = ['快捷运行', '配置管理', '更多设置'].filter((group) => groupedItems[group]?.length)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const itemRefs = useRef<Array<HTMLButtonElement | null>>([])
+  const orderedItems = useMemo(() => orderedGroups.flatMap((group) => groupedItems[group]), [groupedItems, orderedGroups])
+  const indexByKey = useMemo(
+    () =>
+      Object.fromEntries(
+        orderedItems.map((item, index) => [item.key, index] as const)
+      ) as Record<string, number>,
+    [orderedItems]
+  )
+  const [activeIndex, setActiveIndex] = useState(0)
+
+  useEffect(() => {
+    setActiveIndex(0)
+  }, [orderedItems.length])
+
+  useEffect(() => {
+    itemRefs.current[activeIndex]?.focus()
+  }, [activeIndex, orderedItems.length])
 
   useEffect(() => {
     const handler = () => onClose()
     const keyHandler = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
+      if (event.key === 'Escape') {
+        onClose()
+        return
+      }
+      if (orderedItems.length === 0) return
+      if (event.key === 'ArrowDown') {
+        event.preventDefault()
+        setActiveIndex((prev) => (prev + 1) % orderedItems.length)
+        return
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault()
+        setActiveIndex((prev) => (prev - 1 + orderedItems.length) % orderedItems.length)
+        return
+      }
+      if (event.key === 'Home') {
+        event.preventDefault()
+        setActiveIndex(0)
+        return
+      }
+      if (event.key === 'End') {
+        event.preventDefault()
+        setActiveIndex(Math.max(orderedItems.length - 1, 0))
+        return
+      }
+      if (event.key === 'Enter' || event.key === ' ') {
+        const target = orderedItems[activeIndex]
+        if (!target) return
+        event.preventDefault()
+        target.onClick()
+        onClose()
+      }
     }
     window.addEventListener('click', handler)
     window.addEventListener('contextmenu', handler)
@@ -45,21 +95,25 @@ export function ContextMenu({
       window.removeEventListener('contextmenu', handler)
       window.removeEventListener('keydown', keyHandler)
     }
-  }, [onClose])
+  }, [activeIndex, onClose, orderedItems])
 
   return (
     <div
       data-testid="command-context-menu"
+      ref={menuRef}
+      className="ui-popover"
+      role="menu"
+      aria-label="命令上下文菜单"
       style={{
         position: 'fixed',
         top: clampedTop,
         left: clampedLeft,
         zIndex: 2000,
         background: 'var(--panel)',
-        border: '1px solid var(--border-strong)',
+        border: '1px solid var(--border-default)',
         borderRadius: 14,
-        boxShadow: 'var(--shadow-card)',
-        padding: 6,
+        boxShadow: 'var(--shadow-hover)',
+        padding: 8,
         minWidth: 170,
         width: menuWidth,
         maxHeight: menuMaxHeight,
@@ -72,10 +126,18 @@ export function ContextMenu({
           {groupedItems[groupName].map((item) => (
             <button
               key={item.key}
+              ref={(el) => {
+                itemRefs.current[indexByKey[item.key]] = el
+              }}
+              role="menuitem"
+              tabIndex={indexByKey[item.key] === activeIndex ? 0 : -1}
               onClick={(event) => {
                 event.stopPropagation()
                 item.onClick()
                 onClose()
+              }}
+              onMouseEnter={() => {
+                setActiveIndex(indexByKey[item.key])
               }}
               style={{
                 width: '100%',

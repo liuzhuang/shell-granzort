@@ -69,6 +69,8 @@ const api = {
     ipcRenderer.invoke('terminal:resize', commandName, cols, rows, options) as Promise<{ ok: boolean }>,
   terminalStop: (commandName: string, options?: { sessionId?: string }) =>
     ipcRenderer.invoke('terminal:stop', commandName, options) as Promise<{ ok: boolean }>,
+  terminalStopAllForCommand: (commandName: string) =>
+    ipcRenderer.invoke('terminal:stop-all-for-command', commandName) as Promise<{ ok: boolean; stopped: number }>,
   terminalGetBuffer: (commandName: string, options?: { sessionId?: string }) =>
     ipcRenderer.invoke('terminal:get-buffer', commandName, options) as Promise<{ text: string }>,
   terminalGetInstanceCount: () => ipcRenderer.invoke('terminal:get-instance-count') as Promise<{ count: number }>,

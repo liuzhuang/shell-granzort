@@ -4,6 +4,10 @@ const radiusSm = 'var(--radius-xs)'
 const radiusPill = 'var(--radius-pill)'
 const borderDefault = '1px solid var(--border-default)'
 const borderStrong = '1px solid var(--border-strong)'
+const pressScalePrimary = { ['--press-scale' as string]: '0.964' } as CSSProperties
+const pressScaleMuted = { ['--press-scale' as string]: '0.978' } as CSSProperties
+const pressScaleWarn = { ['--press-scale' as string]: '0.972' } as CSSProperties
+const pressScaleDanger = { ['--press-scale' as string]: '0.97' } as CSSProperties
 
 export const inputStyle: CSSProperties = {
   width: '100%',
@@ -15,7 +19,8 @@ export const inputStyle: CSSProperties = {
   outline: 'none',
   color: 'var(--text)',
   fontFamily: 'var(--font-ui)',
-  transition: 'border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease'
+  transition:
+    'border-color var(--motion-normal) var(--ease-standard), box-shadow var(--motion-normal) var(--ease-standard), background-color var(--motion-normal) var(--ease-standard)'
 }
 
 export function chipStyle(active: boolean): CSSProperties {
@@ -28,7 +33,9 @@ export function chipStyle(active: boolean): CSSProperties {
     background: active ? 'var(--panel)' : 'var(--panel-soft)',
     color: active ? 'var(--text)' : 'var(--muted)',
     cursor: 'pointer',
-    transition: 'transform 120ms ease, background-color 150ms ease, border-color 150ms ease'
+    transition:
+      'transform var(--motion-fast) var(--ease-out-strong), background-color var(--motion-normal) var(--ease-standard), border-color var(--motion-normal) var(--ease-standard), color var(--motion-normal) var(--ease-standard), box-shadow var(--motion-normal) var(--ease-standard)',
+    ...pressScaleMuted
   }
 }
 
@@ -44,7 +51,10 @@ export function buttonStyle(variant: 'primary' | 'muted' | 'warn' | 'danger'): C
       color: 'var(--panel)',
       fontFamily: 'var(--font-ui)',
       cursor: 'pointer',
-      transition: 'transform 120ms ease, background-color 150ms ease, border-color 150ms ease'
+      transition:
+        'transform var(--motion-fast) var(--ease-out-strong), background-color var(--motion-normal) var(--ease-standard), border-color var(--motion-normal) var(--ease-standard), color var(--motion-normal) var(--ease-standard), box-shadow var(--motion-normal) var(--ease-standard)',
+      boxShadow: '0 1px 0 color-mix(in srgb, var(--text) 26%, transparent)',
+      ...pressScalePrimary
     }
   }
   if (variant === 'warn') {
@@ -58,7 +68,9 @@ export function buttonStyle(variant: 'primary' | 'muted' | 'warn' | 'danger'): C
       color: 'var(--warn)',
       fontFamily: 'var(--font-ui)',
       cursor: 'pointer',
-      transition: 'transform 120ms ease, background-color 150ms ease, border-color 150ms ease'
+      transition:
+        'transform var(--motion-fast) var(--ease-out-strong), background-color var(--motion-normal) var(--ease-standard), border-color var(--motion-normal) var(--ease-standard), color var(--motion-normal) var(--ease-standard), box-shadow var(--motion-normal) var(--ease-standard)',
+      ...pressScaleWarn
     }
   }
   if (variant === 'danger') {
@@ -72,7 +84,9 @@ export function buttonStyle(variant: 'primary' | 'muted' | 'warn' | 'danger'): C
       color: 'var(--err)',
       fontFamily: 'var(--font-ui)',
       cursor: 'pointer',
-      transition: 'transform 120ms ease, background-color 150ms ease, border-color 150ms ease'
+      transition:
+        'transform var(--motion-fast) var(--ease-out-strong), background-color var(--motion-normal) var(--ease-standard), border-color var(--motion-normal) var(--ease-standard), color var(--motion-normal) var(--ease-standard), box-shadow var(--motion-normal) var(--ease-standard)',
+      ...pressScaleDanger
     }
   }
   return {
@@ -85,6 +99,8 @@ export function buttonStyle(variant: 'primary' | 'muted' | 'warn' | 'danger'): C
     color: 'var(--text)',
     fontFamily: 'var(--font-ui)',
     cursor: 'pointer',
-    transition: 'transform 120ms ease, background-color 150ms ease, border-color 150ms ease'
+    transition:
+      'transform var(--motion-fast) var(--ease-out-strong), background-color var(--motion-normal) var(--ease-standard), border-color var(--motion-normal) var(--ease-standard), color var(--motion-normal) var(--ease-standard), box-shadow var(--motion-normal) var(--ease-standard)',
+    ...pressScaleMuted
   }
 }

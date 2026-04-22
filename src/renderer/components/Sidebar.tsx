@@ -274,21 +274,11 @@ export function Sidebar({ page, onChange, appVersion, onCheckUpdate, tickerEvent
                 fontWeight: active ? 600 : 500,
                 cursor: 'pointer',
                 textAlign: 'left',
-                transition: 'all 160ms ease',
+                transition:
+                  'background-color var(--motion-normal) var(--ease-standard), color var(--motion-normal) var(--ease-standard), box-shadow var(--motion-slow) var(--ease-out-strong)',
                 boxShadow: active ? 'var(--shadow-card)' : 'none'
               }}
-              onMouseEnter={(e) => {
-                if (!active) {
-                  e.currentTarget.style.background = 'var(--panel-soft)'
-                  e.currentTarget.style.color = 'var(--text)'
-                }
-              }}
-              onMouseLeave={(e) => {
-                if (!active) {
-                  e.currentTarget.style.background = 'transparent'
-                  e.currentTarget.style.color = 'var(--muted)'
-                }
-              }}
+              className="sidebar-nav-button"
             >
               <span style={{ color: active ? 'var(--accent)' : 'var(--muted)', display: 'flex', flexShrink: 0 }}>{item.icon}</span>
               {!iconOnly ? item.label : null}
@@ -329,7 +319,8 @@ export function Sidebar({ page, onChange, appVersion, onCheckUpdate, tickerEvent
               color: 'var(--muted)',
               opacity: 0.55,
               cursor: 'pointer',
-              transition: 'opacity 160ms ease, background 160ms ease'
+              transition:
+                'opacity var(--motion-normal) var(--ease-standard), background-color var(--motion-normal) var(--ease-standard), color var(--motion-normal) var(--ease-standard)'
             }}
             onMouseEnter={(e) => {
               e.currentTarget.style.opacity = '0.85'
@@ -364,7 +355,8 @@ export function Sidebar({ page, onChange, appVersion, onCheckUpdate, tickerEvent
               opacity: 0.55,
               cursor: 'pointer',
               fontWeight: 500,
-              letterSpacing: '0.03em'
+              letterSpacing: '0.03em',
+              transition: 'opacity var(--motion-normal) var(--ease-standard), color var(--motion-normal) var(--ease-standard)'
             }}
             onMouseEnter={(e) => {
               e.currentTarget.style.opacity = '0.85'

@@ -10,7 +10,8 @@ export function Panel({ children, soft = false, style, className }: { children: 
         borderRadius: soft ? 'var(--radius-md)' : 'var(--radius-lg)',
         boxShadow: soft ? 'none' : 'var(--shadow-card)',
         padding: 12,
-        transition: 'border-color 150ms ease, box-shadow 200ms ease, background-color 150ms ease',
+        transition:
+          'border-color var(--motion-normal) var(--ease-standard), box-shadow var(--motion-slow) var(--ease-out-strong), background-color var(--motion-normal) var(--ease-standard)',
         ...style
       }}
     >

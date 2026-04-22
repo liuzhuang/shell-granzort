@@ -483,6 +483,20 @@ export function DashboardPage() {
     if (viewMode === 'Viewing') setViewMode('Creating')
   }, [viewMode])
 
+  const modeLabel = useMemo(() => {
+    if (viewMode === 'Viewing') return '查看模式'
+    if (viewMode === 'Creating') return '创建模式'
+    if (viewMode === 'Saving') return '保存中'
+    return '编辑模式'
+  }, [viewMode])
+
+  const modeColor = useMemo(() => {
+    if (viewMode === 'Saving') return 'var(--run)'
+    if (viewMode === 'Creating') return 'var(--accent)'
+    if (viewMode === 'Editing') return 'var(--warn)'
+    return 'var(--muted)'
+  }, [viewMode])
+
   useEffect(() => {
     if (navigator.webdriver) return undefined
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -495,7 +509,37 @@ export function DashboardPage() {
   }, [isDirty])
 
   return (
-    <div data-testid="dashboard-page" style={{ height: '100%', display: 'flex', gap: 12, minHeight: 0 }}>
+    <div data-testid="dashboard-page" style={{ height: '100%', display: 'flex', gap: 12, minHeight: 0, position: 'relative' }}>
+      <div
+        style={{
+          position: 'absolute',
+          top: 10,
+          right: 12,
+          zIndex: 12,
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '6px 10px',
+          borderRadius: 'var(--radius-pill)',
+          border: `1px solid color-mix(in srgb, ${modeColor} 28%, var(--border-default))`,
+          background: 'color-mix(in srgb, var(--panel) 84%, transparent)',
+          color: 'var(--text-dim)',
+          fontSize: 11,
+          fontWeight: 600,
+          backdropFilter: 'blur(8px)'
+        }}
+      >
+        <span
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: 999,
+            background: modeColor
+          }}
+        />
+        {modeLabel}
+        {isDirty ? ' · 有未保存更改' : ''}
+      </div>
       <DashboardCanvasPanel
         mode={viewMode}
         isDirty={isDirty}
@@ -556,6 +600,7 @@ export function DashboardPage() {
             role="dialog"
             aria-modal="true"
             aria-label="看板助手弹窗"
+            className="ui-dialog-panel"
             onClick={(event) => event.stopPropagation()}
             style={{
               width: 460,
@@ -646,6 +691,63 @@ export function DashboardPage() {
         >
           打开看板助手
         </button>
+      ) : null}
+
+      {isDirty && viewMode !== 'Saving' ? (
+        <div
+          style={{
+            position: 'fixed',
+            left: '50%',
+            bottom: 20,
+            transform: 'translateX(-50%)',
+            zIndex: 1100,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '10px 12px',
+            borderRadius: 'var(--radius-pill)',
+            border: '1px solid var(--border-default)',
+            background: 'color-mix(in srgb, var(--panel) 86%, transparent)',
+            boxShadow: 'var(--shadow-hover)',
+            backdropFilter: 'blur(12px)'
+          }}
+        >
+          <span style={{ fontSize: 12, color: 'var(--text-dim)', fontWeight: 600 }}>草稿已修改，是否保存变更？</span>
+          <button
+            type="button"
+            style={{
+              border: '1px solid color-mix(in srgb, var(--accent) 36%, var(--border-default))',
+              borderRadius: 'var(--radius-xs)',
+              background: 'color-mix(in srgb, var(--accent) 16%, var(--panel-soft))',
+              color: 'var(--text)',
+              padding: '5px 10px',
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: 'pointer'
+            }}
+            onClick={() => {
+              void handleSaveDraft()
+            }}
+          >
+            立即保存
+          </button>
+          <button
+            type="button"
+            style={{
+              border: '1px solid color-mix(in srgb, var(--warn) 26%, var(--border-default))',
+              borderRadius: 'var(--radius-xs)',
+              background: 'color-mix(in srgb, var(--warn) 10%, var(--panel-soft))',
+              color: 'var(--warn)',
+              padding: '5px 10px',
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: 'pointer'
+            }}
+            onClick={handleCancelEditing}
+          >
+            放弃更改
+          </button>
+        </div>
       ) : null}
     </div>
   )

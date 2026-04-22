@@ -52,6 +52,7 @@ export function MonitoringPage({
   const metricPollTimerRef = useRef<number | null>(null)
   const actionErrorRef = useRef(onActionError)
   const monitorDispatchSeqRef = useRef(0)
+  const monitoredCommandRef = useRef('')
   const traceIdRef = useRef<string>(createTraceId())
   const previousNetSnapshotRef = useRef<{ rxBytes: number; txBytes: number; at: number } | null>(null)
   const topCapturePhaseRef = useRef<'idle' | 'capturing'>('idle')
@@ -200,6 +201,35 @@ export function MonitoringPage({
   }, [commandName])
 
   useEffect(() => {
+    // 切换监控目标时清空上一命令的可视化状态，避免残留造成“串台”错觉。
+    setSessionState('idle')
+    setLatestChunk('')
+    setLatestMetrics({})
+    setCpuSeries([])
+    setLoadSeries([])
+    setMemorySeries([])
+    setDiskSeries([])
+    setNetRxSeries([])
+    setNetTxSeries([])
+    setTopOutputLines([])
+    setTopLoading(false)
+    setTopCapturedAt(null)
+    setTopLastKind(null)
+    setLastPollAt(null)
+    setLastMetricAt(null)
+    setPollErrorCount(0)
+    setLastPollError('')
+    monitorDispatchSeqRef.current = 0
+    previousNetSnapshotRef.current = null
+    topCapturePhaseRef.current = 'idle'
+    topLinesAccRef.current = []
+    if (topLoadTimeoutRef.current !== null) {
+      window.clearTimeout(topLoadTimeoutRef.current)
+      topLoadTimeoutRef.current = null
+    }
+  }, [commandName])
+
+  useEffect(() => {
     return () => {
       if (topLoadTimeoutRef.current !== null) {
         window.clearTimeout(topLoadTimeoutRef.current)
@@ -229,6 +259,12 @@ export function MonitoringPage({
   }, [aiAutoRefresh])
 
   useEffect(() => {
+    const previousCommand = monitoredCommandRef.current
+    if (previousCommand && previousCommand !== commandName) {
+      void window.api.terminalStop(previousCommand).catch(() => undefined)
+    }
+    monitoredCommandRef.current = commandName
+
     if (!commandName) return
     if (!monitorEnabled) {
       setSessionState('idle')

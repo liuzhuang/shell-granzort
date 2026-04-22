@@ -140,11 +140,16 @@ export function TitleBar({
                 alignItems: 'center',
                 gap: 8,
                 padding: '4px 10px',
-                border: '1px solid var(--border-subtle)',
+                border: '1px solid var(--border-default)',
                 borderRadius: 'var(--radius-xs)',
                 fontSize: 11,
                 color: 'var(--text)',
-                background: 'var(--panel-soft)',
+                background:
+                  updateChip.action === 'install'
+                    ? 'color-mix(in srgb, var(--ok) 10%, var(--panel-soft))'
+                    : updateChip.action === 'retry'
+                      ? 'color-mix(in srgb, var(--warn) 10%, var(--panel-soft))'
+                      : 'var(--panel-soft)',
                 fontWeight: 600,
                 maxWidth: 360
               }}
@@ -191,11 +196,13 @@ export function TitleBar({
               border: '1px solid var(--border-subtle)',
               borderRadius: 'var(--radius-xs)',
               fontSize: 11,
-              color: 'var(--muted)',
+              color: 'var(--text-dim)',
               background: 'var(--panel-soft)',
               fontWeight: 600,
               cursor: 'pointer',
-              fontFamily: 'inherit'
+              fontFamily: 'inherit',
+              transition:
+                'border-color var(--motion-normal) var(--ease-standard), background-color var(--motion-normal) var(--ease-standard), color var(--motion-normal) var(--ease-standard)'
             }}
           >
             Shell实例 {terminalInstanceCount}
@@ -221,6 +228,7 @@ export function TitleBar({
             >
               <div
                 data-testid="shell-instances-overlay-panel"
+                className="ui-dialog-panel"
                 role="dialog"
                 aria-modal="true"
                 aria-label="Shell 实例列表"
@@ -338,9 +346,9 @@ export function TitleBar({
               border: '1px solid var(--border-subtle)',
               borderRadius: 'var(--radius-xs)',
               fontSize: 11,
-              color: 'var(--muted)',
-              background: 'var(--panel-soft)',
-              fontWeight: 600
+              color: 'var(--text-dim)',
+              background: 'color-mix(in srgb, var(--panel-soft) 74%, transparent)',
+              fontWeight: 500
             }}
           >
             运行中任务 {runningOverview.runningCount}/{runningOverview.totalCount}
@@ -364,6 +372,7 @@ export function TitleBar({
             {showThemePresetPopup && (
               <div
                 data-testid="theme-preset-popup"
+                className="ui-popover"
                 style={{
                   position: 'absolute',
                   top: 'calc(100% + 8px)',
