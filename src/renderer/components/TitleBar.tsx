@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { Panel } from './Panel'
 import { chipStyle } from '../lib/uiStyles'
 import type { AppPage } from '../hooks/useNavigation'
@@ -22,6 +22,17 @@ function sessionKindLabel(kind: string): string {
     default:
       return `来源：${kind}`
   }
+}
+
+function pageMeta(page: AppPage): { label: string; icon: string } {
+  if (page === 'home' || page === 'log' || page === 'terminal') return { label: '命令列表', icon: '▦' }
+  if (page === 'multiLog') return { label: '日志看板', icon: '▤' }
+  if (page === 'query') return { label: 'AI日志', icon: '⌕' }
+  if (page === 'dashboard') return { label: '可视化看板', icon: '◫' }
+  if (page === 'monitoring') return { label: 'AI监控', icon: '∿' }
+  if (page === 'ssh-keys') return { label: 'SSH 密钥', icon: '⚿' }
+  if (page === 'collaboration') return { label: '协作', icon: '◎' }
+  return { label: '编辑配置文件', icon: '✎' }
 }
 
 export function TitleBar({
@@ -55,6 +66,9 @@ export function TitleBar({
   onDownloadUpdate?: () => void
   onQuitAndInstall?: () => void
 }) {
+  const dragRegionStyle = { WebkitAppRegion: 'drag' } as unknown as CSSProperties
+  const noDragRegionStyle = { WebkitAppRegion: 'no-drag' } as unknown as CSSProperties
+  const currentPage = pageMeta(page)
   const presetLabel = themePreset === 'coder' ? '程序员' : themePreset === 'girl' ? '女生' : '夏日'
   const [showThemePresetPopup, setShowThemePresetPopup] = useState(false)
   const themePresetPopupRef = useRef<HTMLDivElement | null>(null)
@@ -116,22 +130,37 @@ export function TitleBar({
                 : null
 
   return (
-    <Panel style={{ padding: '10px 14px', borderRadius: 0 }}>
+    <Panel
+      style={{
+        padding: '10px 14px',
+        borderRadius: 0,
+        minHeight: 46,
+        ...dragRegionStyle
+      }}
+    >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>
-            {page === 'home' || page === 'log' || page === 'terminal'
-              ? '命令列表'
-              : page === 'query'
-                ? 'AI日志'
-                : page === 'dashboard'
-                  ? '可视化看板'
-                  : page === 'monitoring'
-                    ? 'AI服务器监控'
-                  : '编辑配置文件'}
+          <span
+            style={{
+              width: 18,
+              height: 18,
+              borderRadius: 'var(--radius-xs)',
+              border: '1px solid var(--border-subtle)',
+              background: 'var(--panel-soft)',
+              color: 'var(--accent)',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: 12,
+              fontWeight: 700,
+              ...noDragRegionStyle
+            }}
+          >
+            {currentPage.icon}
           </span>
+          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{currentPage.label}</span>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, ...noDragRegionStyle }}>
           {updateChip && (
             <div
               data-testid="update-banner"
@@ -282,7 +311,7 @@ export function TitleBar({
                     }}
                   >
                     {
-                      '同一命令可能出现多条：「终端」里每个分屏会单独起一条 PTY；「AI 服务器监控」开启时还会占用该命令的默认会话槽（无会话 id），用于执行监控与探测，与终端页会话相互独立。'
+                      '同一命令可能出现多条：「终端」里每个分屏会单独起一条 PTY；「AI 监控」开启时还会占用该命令的默认会话槽（无会话 id），用于执行监控与探测，与终端页会话相互独立。'
                     }
                   </div>
                 )}

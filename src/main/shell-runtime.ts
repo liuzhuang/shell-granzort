@@ -24,13 +24,25 @@ export function resolveShellExecutable(): string {
 }
 
 export function resolveTerminalArgs(shellExec: string, command: string): string[] {
-  if (process.platform !== 'win32') return ['-lc', command]
+  if (process.platform !== 'win32') {
+    return ['-lc', injectLocalRcBootstrap(shellExec, command)]
+  }
   const shellName = basename(shellExec).toLowerCase()
   if (shellName.includes('pwsh') || shellName.includes('powershell')) {
     return ['-NoLogo', '-NoExit', '-Command', command]
   }
   if (shellName.includes('cmd')) return ['/d', '/s', '/k', command]
   return ['/d', '/s', '/k', command]
+}
+
+export function resolveServiceArgs(shellExec: string, command: string): string[] {
+  if (process.platform !== 'win32') return ['-lc', injectLocalRcBootstrap(shellExec, command)]
+  const shellName = basename(shellExec).toLowerCase()
+  if (shellName.includes('pwsh') || shellName.includes('powershell')) {
+    return ['-NoLogo', '-NonInteractive', '-Command', command]
+  }
+  if (shellName.includes('cmd')) return ['/d', '/s', '/c', command]
+  return ['/d', '/s', '/c', command]
 }
 
 function resolveWindowsShell(): string {
@@ -88,4 +100,18 @@ function canExecute(command: string): boolean {
   const checker = process.platform === 'win32' ? 'where' : 'which'
   const result = spawnSync(checker, [command], { stdio: 'ignore' })
   return result.status === 0
+}
+
+/**
+ * 仅 source 与当前 shell 匹配的 rc，避免 zsh / bash 同时 source 触发 nvm 等初始化跑两遍。
+ * zsh -> ~/.zshrc，bash -> ~/.bashrc，其余 shell 不注入。
+ */
+function injectLocalRcBootstrap(shellExec: string, command: string): string {
+  const shellName = basename(shellExec).toLowerCase()
+  let rcPath: string | undefined
+  if (shellName.includes('zsh')) rcPath = '$HOME/.zshrc'
+  else if (shellName.includes('bash')) rcPath = '$HOME/.bashrc'
+  if (!rcPath) return command
+  const bootstrap = `if [ -f "${rcPath}" ]; then . "${rcPath}" >/dev/null 2>&1 || true; fi`
+  return `${bootstrap}; ${command}`
 }

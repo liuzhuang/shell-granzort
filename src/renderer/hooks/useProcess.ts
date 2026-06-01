@@ -7,7 +7,7 @@ export function useProcessState(logBufferLines: number) {
   const [logMap, setLogMap] = useState<Record<string, string[]>>({})
 
   useEffect(() => {
-    window.api.onProcessStatus((payload) => {
+    const offStatus = window.api.onProcessStatus((payload) => {
       setStatusMap((prev) => ({
         ...prev,
         [payload.commandName]: {
@@ -19,7 +19,11 @@ export function useProcessState(logBufferLines: number) {
         }
       }))
     })
-    window.api.onProcessOutput((payload) => pushProcessLog(payload))
+    const offOutput = window.api.onProcessOutput((payload) => pushProcessLog(payload))
+    return () => {
+      offStatus?.()
+      offOutput?.()
+    }
   }, [logBufferLines])
 
   function pushProcessLog(payload: ProcessOutputPayload) {
@@ -30,6 +34,14 @@ export function useProcessState(logBufferLines: number) {
         [payload.commandName]: lines.slice(-logBufferLines)
       }
     })
+  }
+
+  function clearProcessLogs(commandName: string) {
+    if (!commandName) return
+    setLogMap((prev) => ({
+      ...prev,
+      [commandName]: []
+    }))
   }
 
   function colorByState(state: ProcessState): string {
@@ -58,6 +70,7 @@ export function useProcessState(logBufferLines: number) {
   return {
     statusMap,
     logMap,
+    clearProcessLogs,
     colorByState,
     runningSummary
   }

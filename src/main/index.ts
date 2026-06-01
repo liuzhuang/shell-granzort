@@ -9,6 +9,7 @@ import { setupAutoUpdater } from './auto-updater'
 import { ProcessManager } from './process-manager'
 import { normalizeRuntimeEnv } from './shell-runtime'
 import { TrayManager } from './tray-manager'
+import { setupApplicationMenu } from './app-menu'
 
 let mainWindow: BrowserWindow | undefined
 let currentConfig: AppConfig
@@ -59,6 +60,12 @@ function createFallbackDockIcon() {
 function showMainWindow(): void {
   if (!mainWindow) return
   if (process.platform === 'darwin') app.dock.show()
+  if (mainWindow.isVisible()) {
+    mainWindow.focus()
+    return
+  }
+  // 首次启动尚未 ready 时，由 ready-to-show 负责最大化并展示窗口。
+  if (mainWindow.webContents.isLoading()) return
   mainWindow.show()
   mainWindow.focus()
 }
@@ -71,9 +78,20 @@ function hideToBackground(): void {
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
+    show: false,
     width: 1320,
     height: 860,
-    backgroundColor: '#F5F4F1',
+    backgroundColor: '#121417',
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : undefined,
+    ...(process.platform !== 'darwin'
+      ? {
+          titleBarOverlay: {
+            color: '#161A20',
+            symbolColor: '#D8DEE9',
+            height: 34
+          }
+        }
+      : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js')
     },
@@ -85,6 +103,13 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  mainWindow.once('ready-to-show', () => {
+    mainWindow?.maximize()
+    mainWindow?.show()
+    if (process.platform === 'darwin') app.dock.show()
+    mainWindow?.focus()
+  })
 
   mainWindow.on('close', (event) => {
     if (!isQuitting) {
@@ -121,6 +146,26 @@ app.whenReady().then(async () => {
   )
 
   setupAutoUpdater(broadcast)
+
+  setupApplicationMenu({
+    onOpen: showMainWindow,
+    onHide: hideToBackground,
+    onQuit: () => {
+      isQuitting = true
+      app.quit()
+    },
+    onCheckUpdate: () => {
+      mainWindow?.webContents.send('app:check-update')
+    },
+    onNavigate: (target) => {
+      mainWindow?.webContents.send('app:navigate', { target })
+      showMainWindow()
+    },
+    onFocusHomeSearch: () => {
+      mainWindow?.webContents.send('app:focus-home-search')
+      showMainWindow()
+    }
+  })
 
   configLoader.watch(() => {
     try {

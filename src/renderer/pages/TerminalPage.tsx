@@ -10,17 +10,34 @@ let terminalPageCache: {
   experimentalEnabled: boolean
   sessionStateBySessionId: Record<string, 'running' | 'idle'>
 } | null = null
+const paneStartInFlightByKey = new Map<
+  string,
+  Promise<{ ok: boolean; state?: 'running' | 'idle'; buffer?: string }>
+>()
+const TERMINAL_AUTO_RETURN_HOME_KEY = 'terminal.autoReturnHome.v1'
+
+function readAutoReturnHomePreference(): boolean {
+  try {
+    return window.localStorage.getItem(TERMINAL_AUTO_RETURN_HOME_KEY) === '1'
+  } catch {
+    return false
+  }
+}
 
 export function TerminalPage({
   commandName,
   commands,
+  commandDisplayNames,
   onBack,
-  onActionError
+  onActionError,
+  onTrackAction
 }: {
   commandName: string
   commands: Array<{ name: string }>
+  commandDisplayNames?: Record<string, string>
   onBack: () => void
   onActionError: (message: string) => void
+  onTrackAction: (featureKey: string, action: string, result?: 'success' | 'fail' | 'unknown') => void
 }) {
   const actionErrorRef = useRef(onActionError)
   const experimentalEnabledRef = useRef(false)
@@ -44,6 +61,15 @@ export function TerminalPage({
     if (typeof document === 'undefined') return false
     return document.documentElement.dataset.theme === 'light'
   })
+  const [autoReturnHome, setAutoReturnHome] = useState(readAutoReturnHomePreference)
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(TERMINAL_AUTO_RETURN_HOME_KEY, autoReturnHome ? '1' : '0')
+    } catch {
+      /* ignore */
+    }
+  }, [autoReturnHome])
 
   const activeTab = useMemo(
     () => tabs.find((item) => item.id === activeTabId) || tabs[0] || null,
@@ -54,6 +80,7 @@ export function TerminalPage({
     [activeTab]
   )
   const activeCommand = activePane?.commandName || ''
+  const activeCommandLabel = (activeCommand && commandDisplayNames?.[activeCommand]) || activeCommand
 
   useEffect(() => {
     if (tabs.length === 0) {
@@ -91,14 +118,13 @@ export function TerminalPage({
     if (!currentPane) return
     if (currentPane.commandName === commandName) return
 
-    // 外部命令切换时必须切新会话，避免复用旧 sessionId 导致串台。
     if (currentPane.commandName && currentPane.sessionId) {
       void window.api.terminalStop(currentPane.commandName, { sessionId: currentPane.sessionId })
     }
-    const nextSessionId = tabsafeId('session')
+    const nextSessionId = ''
     setSessionStateBySessionId((prev) => {
       const next = { ...prev }
-      if (currentPane.sessionId) delete next[currentPane.sessionId]
+      delete next[resolveSessionStateKey(currentPane.commandName, currentPane.sessionId)]
       return next
     })
     setTabs((prev) =>
@@ -165,6 +191,7 @@ export function TerminalPage({
   }, [activeCommand, activePane?.id])
 
   function createNewTab() {
+    onTrackAction('terminal.tab.create', 'click', 'success')
     const next = createTab(`会话 ${tabs.length + 1}`, activeCommand || commandName || commands[0]?.name || '')
     setTabs((prev) => [...prev, next])
     setActiveTabId(next.id)
@@ -172,12 +199,13 @@ export function TerminalPage({
 
   function stopPaneSessions(panes: TerminalPaneState[]) {
     for (const pane of panes) {
-      if (!pane.commandName || !pane.sessionId) continue
-      void window.api.terminalStop(pane.commandName, { sessionId: pane.sessionId })
+      if (!pane.commandName) continue
+      void window.api.terminalStop(pane.commandName, { sessionId: pane.sessionId || undefined })
     }
   }
 
   function closeTab(tabId: string) {
+    onTrackAction('terminal.tab.close', 'click', 'success')
     setTabs((prev) => {
       if (prev.length <= 1) return prev
       const idx = prev.findIndex((item) => item.id === tabId)
@@ -199,6 +227,7 @@ export function TerminalPage({
   }
 
   function applyLayout(layout: TerminalLayout) {
+    onTrackAction('terminal.layout.change', layout, 'success')
     updateActiveTab((tab) => {
       const paneCount = layout === 'single' ? 1 : layout === 'horizontal-2' || layout === 'vertical-2' ? 2 : 4
       const nextPanes = ensurePaneCount(tab.panes, paneCount, commandName || commands[0]?.name || '')
@@ -212,6 +241,7 @@ export function TerminalPage({
   }
 
   function removePane(paneId: string) {
+    onTrackAction('terminal.pane.remove', 'click', 'success')
     updateActiveTab((tab) => {
       if (tab.panes.length <= 1) return tab
       const target = tab.panes.find((pane) => pane.id === paneId)
@@ -225,6 +255,7 @@ export function TerminalPage({
   }
 
   function togglePaneFullscreen(paneId: string) {
+    onTrackAction('terminal.pane.fullscreen', 'click', 'success')
     updateActiveTab((tab) => ({
       ...tab,
       fullscreenPaneId: tab.fullscreenPaneId === paneId ? undefined : paneId,
@@ -306,6 +337,7 @@ export function TerminalPage({
               <button
                 data-testid="terminal-back-icon"
                 onClick={onBack}
+                onMouseDown={() => onTrackAction('terminal.back_home', 'click', 'success')}
                 title="返回上一级"
                 style={{
                   border: '1px solid var(--border-default)',
@@ -325,10 +357,10 @@ export function TerminalPage({
               >
                 ←
               </button>
-              <div style={{ fontWeight: 700, fontSize: 14 }}>命令交互窗口 · {activeCommand || '未选择命令'}</div>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>命令交互窗口 · {activeCommandLabel || '未选择命令'}</div>
             </div>
             <div style={{ fontSize: 12, ...pageMetaTextStyle }}>
-              状态：{activeCommand ? (activePane?.sessionId && sessionStateBySessionId[activePane.sessionId] === 'running' ? '正在连接' : '已结束') : '未选择'}（支持交互式命令，如
+              状态：{activeCommand && activePane && sessionStateBySessionId[resolveSessionStateKey(activePane.commandName, activePane.sessionId)] === 'running' ? '正在连接' : activeCommand ? '已结束' : '未选择'}（支持交互式命令，如
               tail -f）
             </div>
           </div>
@@ -348,19 +380,52 @@ export function TerminalPage({
             <button
               style={buttonStyle(experimentalEnabled ? 'primary' : 'muted')}
               onClick={() => {
+                onTrackAction('terminal.ai_insight.toggle', 'click', 'success')
                 setExperimentalEnabled((prev) => !prev)
               }}
             >
               {experimentalEnabled ? '关闭 AI 洞察（实验）' : 'AI 洞察（实验）'}
             </button>
+            <label
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+                fontSize: 11,
+                color: 'var(--muted)',
+                cursor: 'pointer',
+                padding: '4px 8px',
+                borderRadius: 'var(--radius-xs)',
+                border: '1px solid var(--border-subtle)',
+                background: 'var(--panel-soft)'
+              }}
+            >
+              <input
+                type="checkbox"
+                data-testid="terminal-auto-return-home"
+                checked={autoReturnHome}
+                onChange={() => {
+                  setAutoReturnHome((prev) => {
+                    const next = !prev
+                    onTrackAction('terminal.auto_return_home.toggle', next ? 'enable' : 'disable', 'success')
+                    return next
+                  })
+                }}
+              />
+              短任务完成后回主页
+            </label>
             <button
               data-testid="terminal-stop-session"
               style={buttonStyle('warn')}
               onClick={async () => {
-                if (!activeCommand || !activePane?.sessionId) return
+                if (!activeCommand) return
                 try {
-                  await window.api.terminalStop(activeCommand, { sessionId: activePane.sessionId })
-                  setSessionStateBySessionId((prev) => ({ ...prev, [activePane.sessionId]: 'idle' }))
+                  onTrackAction('terminal.stop_session', 'click', 'success')
+                  await window.api.terminalStop(activeCommand, { sessionId: activePane?.sessionId || undefined })
+                  setSessionStateBySessionId((prev) => ({
+                    ...prev,
+                    [resolveSessionStateKey(activeCommand, activePane?.sessionId)]: 'idle'
+                  }))
                 } catch (error) {
                   onActionError(error instanceof Error ? error.message : String(error))
                 }
@@ -519,7 +584,7 @@ export function TerminalPage({
                       </span>
                       <span style={{ marginLeft: 'auto', fontSize: 11, ...shellMetaTextStyle }}>
                         {pane.commandName
-                          ? sessionStateBySessionId[pane.sessionId] === 'running'
+                          ? sessionStateBySessionId[resolveSessionStateKey(pane.commandName, pane.sessionId)] === 'running'
                             ? '运行中'
                             : '空闲'
                           : '未绑定'}
@@ -566,8 +631,10 @@ export function TerminalPage({
                         }, 1200)
                       }}
                       onStatus={(state) => {
-                        if (!pane.sessionId) return
-                        setSessionStateBySessionId((prev) => ({ ...prev, [pane.sessionId]: state }))
+                        setSessionStateBySessionId((prev) => ({
+                          ...prev,
+                          [resolveSessionStateKey(pane.commandName, pane.sessionId)]: state
+                        }))
                       }}
                     />
                   </Panel>
@@ -651,7 +718,7 @@ function TerminalPane({
 }: {
   paneId: string
   commandName: string
-  sessionId: string
+  sessionId?: string
   onActionError: (message: string) => void
   onObserver: (chunk: string) => void
   onStatus: (state: 'running' | 'idle') => void
@@ -700,32 +767,34 @@ function TerminalPane({
 
   useEffect(() => {
     const host = hostRef.current
-    if (!host || !fitAddonRef.current || !terminalRef.current || !commandName || !sessionId) return
+    if (!host || !fitAddonRef.current || !terminalRef.current || !commandName) return
     const fitAddon = fitAddonRef.current
     const terminal = terminalRef.current
+    const normalizedSessionId = sessionId?.trim() || undefined
+    const paneMountKey = `${paneId}:${commandName}:${normalizedSessionId || 'default'}`
     const onResize = () => {
       fitAddon.fit()
-      void window.api.terminalResize(commandName, terminal.cols, terminal.rows, { sessionId })
+      void window.api.terminalResize(commandName, terminal.cols, terminal.rows, { sessionId: normalizedSessionId })
     }
     const resizeObserver = new ResizeObserver(onResize)
     resizeObserver.observe(host)
     window.addEventListener('resize', onResize)
 
     const inputDisposable = terminal.onData((data) => {
-      void window.api.terminalInput(commandName, data, { sessionId })
+      void window.api.terminalInput(commandName, data, { sessionId: normalizedSessionId })
     })
     const offData = window.api.onTerminalData((payload) => {
-      if (payload.sessionId !== sessionId) return
+      if ((payload.sessionId || '') !== (normalizedSessionId || '')) return
       if (payload.commandName !== commandName) return
       terminal.write(payload.data)
     })
     const offObserver = window.api.onTerminalObserver((payload) => {
-      if (payload.sessionId !== sessionId) return
+      if ((payload.sessionId || '') !== (normalizedSessionId || '')) return
       if (payload.commandName !== commandName) return
       onObserverRef.current(payload.chunk)
     })
     const offStatus = window.api.onTerminalStatus((payload) => {
-      if (payload.sessionId !== sessionId) return
+      if ((payload.sessionId || '') !== (normalizedSessionId || '')) return
       if (payload.commandName !== commandName) return
       onStatusRef.current(payload.state)
       if (payload.state === 'idle' && typeof payload.exitCode === 'number') {
@@ -735,23 +804,51 @@ function TerminalPane({
     /** 首页「打开窗口」会占用无 sessionId 的默认槽；进入交互页再启 Pane 会形成双 PTY，仅终止 Pane 时列表仍显示运行中。 */
     let disposed = false
     const startSession = async () => {
+      let sharedStartPromise = paneStartInFlightByKey.get(paneMountKey)
       try {
-        await window.api.terminalStop(commandName)
-      } catch {
-        /* 无默认槽时忽略 */
-      }
-      if (disposed) return
-      try {
-        const result = await window.api.terminalStart(commandName, { sessionId })
+        if (!sharedStartPromise) {
+          sharedStartPromise = (async () => {
+            if (normalizedSessionId) {
+              try {
+                await window.api.terminalStop(commandName)
+              } catch {
+                /* 无默认槽时忽略 */
+              }
+            }
+            const { instances } = await window.api.terminalListInstances()
+            const hasExistingSession = instances.some(
+              (instance) =>
+                instance.commandName === commandName &&
+                (instance.sessionId || '').trim() === (normalizedSessionId || '')
+            )
+            return hasExistingSession
+              ? {
+                  ok: true,
+                  state: 'running' as const,
+                  buffer: (await window.api.terminalGetBuffer(commandName, { sessionId: normalizedSessionId })).text
+                }
+              : normalizedSessionId
+                ? await window.api.terminalStart(commandName, { sessionId: normalizedSessionId })
+                : await window.api.terminalStart(commandName)
+          })()
+          paneStartInFlightByKey.set(paneMountKey, sharedStartPromise)
+        }
+        const result = await sharedStartPromise
         if (disposed) return
-        if (result.buffer) terminal.write(result.buffer)
+        if (result.buffer) {
+          terminal.write(result.buffer)
+        }
         onStatusRef.current(result.state || 'running')
         if ((result.state || 'running') === 'running') {
-          void window.api.terminalResize(commandName, terminal.cols, terminal.rows, { sessionId })
+          void window.api.terminalResize(commandName, terminal.cols, terminal.rows, { sessionId: normalizedSessionId })
         }
       } catch (error) {
         if (!disposed) {
           onActionErrorRef.current(error instanceof Error ? error.message : String(error))
+        }
+      } finally {
+        if (sharedStartPromise && paneStartInFlightByKey.get(paneMountKey) === sharedStartPromise) {
+          paneStartInFlightByKey.delete(paneMountKey)
         }
       }
     }
@@ -799,7 +896,7 @@ type TerminalLayout = 'single' | 'horizontal-2' | 'vertical-2' | 'grid-4'
 interface TerminalPaneState {
   id: string
   commandName: string
-  sessionId: string
+  sessionId?: string
 }
 
 interface TerminalTabState {
@@ -812,7 +909,7 @@ interface TerminalTabState {
 }
 
 function createTab(title: string, initialCommand: string): TerminalTabState {
-  const firstPane = { id: tabsafeId('pane'), commandName: initialCommand, sessionId: tabsafeId('session') }
+  const firstPane = { id: tabsafeId('pane'), commandName: initialCommand, sessionId: '' }
   return {
     id: tabsafeId('tab'),
     title,
@@ -856,9 +953,13 @@ function ensurePaneCount(panes: TerminalPaneState[], count: number, fallbackComm
   if (panes.length > count) return panes.slice(0, count)
   const next = [...panes]
   while (next.length < count) {
-    next.push({ id: tabsafeId('pane'), commandName: fallbackCommand, sessionId: tabsafeId('session') })
+    next.push({ id: tabsafeId('pane'), commandName: fallbackCommand, sessionId: '' })
   }
   return next
+}
+
+function resolveSessionStateKey(commandName: string, sessionId?: string): string {
+  return sessionId && sessionId.trim().length > 0 ? sessionId.trim() : `default:${commandName || 'unknown'}`
 }
 
 function tabsafeId(prefix: string): string {

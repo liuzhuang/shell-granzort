@@ -28,6 +28,14 @@ const SIDEBAR_ICON_ONLY_KEY = 'sidebar.iconOnly'
 const SIDEBAR_WIDTH_EXPANDED = 216
 const SIDEBAR_WIDTH_ICON_ONLY = 56
 
+export type RecentCommandPage = 'log' | 'terminal' | 'monitoring'
+
+export interface RecentCommandPageItem {
+  commandName: string
+  page: RecentCommandPage
+  updatedAt: number
+}
+
 function readIconOnlyPreference(): boolean {
   try {
     return window.localStorage.getItem(SIDEBAR_ICON_ONLY_KEY) === '1'
@@ -50,10 +58,28 @@ interface SidebarProps {
   appVersion: string
   onCheckUpdate?: () => void
   tickerEvents: string[]
+  recentCommandPages: RecentCommandPageItem[]
+  onOpenRecentCommandPage: (item: RecentCommandPageItem) => void
+  onRemoveRecentCommandPage: (commandName: string) => void
 }
 
-export function Sidebar({ page, onChange, appVersion, onCheckUpdate, tickerEvents }: SidebarProps) {
+function testIdSafe(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, '-')
+}
+
+export function Sidebar({
+  page,
+  onChange,
+  appVersion,
+  onCheckUpdate,
+  tickerEvents,
+  recentCommandPages,
+  onOpenRecentCommandPage,
+  onRemoveRecentCommandPage
+}: SidebarProps) {
+  const isMac = window.api.getPlatform() === 'darwin'
   const [iconOnly, setIconOnly] = useState(readIconOnlyPreference)
+  const [hoveredRecentCommand, setHoveredRecentCommand] = useState<string | null>(null)
 
   useEffect(() => {
     try {
@@ -67,7 +93,9 @@ export function Sidebar({ page, onChange, appVersion, onCheckUpdate, tickerEvent
     home: 'tab-home',
     query: 'tab-log-analysis',
     monitoring: 'tab-monitoring',
-    editor: 'tab-editor'
+    editor: 'tab-editor',
+    'ssh-keys': 'tab-ssh-keys',
+    collaboration: 'tab-collaboration'
   }
 
   const items = [
@@ -95,7 +123,7 @@ export function Sidebar({ page, onChange, appVersion, onCheckUpdate, tickerEvent
     },
     {
       id: 'monitoring',
-      label: 'AI服务器监控',
+      label: 'AI监控',
       icon: (
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M3 3v18h18" />
@@ -114,6 +142,29 @@ export function Sidebar({ page, onChange, appVersion, onCheckUpdate, tickerEvent
           <path d="M14 17l2-2-2-2" />
         </svg>
       )
+    },
+    {
+      id: 'ssh-keys',
+      label: 'SSH 密钥',
+      icon: (
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4" />
+          <path d="m21 2-9.6 9.6" />
+          <circle cx="7.5" cy="15.5" r="5.5" />
+        </svg>
+      )
+    },
+    {
+      id: 'collaboration',
+      label: '协作',
+      icon: (
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+          <circle cx="9" cy="7" r="4" />
+          <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+          <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+        </svg>
+      )
     }
   ]
 
@@ -123,6 +174,7 @@ export function Sidebar({ page, onChange, appVersion, onCheckUpdate, tickerEvent
   }
 
   const w = iconOnly ? SIDEBAR_WIDTH_ICON_ONLY : SIDEBAR_WIDTH_EXPANDED
+  const sidebarTopInset = isMac ? 34 : 0
   const versionTitle = appVersion ? `v${appVersion} Stable` : ''
 
   const toggleIconOnlyStyle: CSSProperties = {
@@ -154,6 +206,7 @@ export function Sidebar({ page, onChange, appVersion, onCheckUpdate, tickerEvent
         display: 'flex',
         flexDirection: 'column',
         padding: iconOnly ? '14px 6px' : '16px 12px',
+        paddingTop: (iconOnly ? 14 : 16) + sidebarTopInset,
         gap: iconOnly ? 12 : 20,
         transition: 'width 180ms ease, min-width 180ms ease, padding 180ms ease'
       }}
@@ -286,14 +339,126 @@ export function Sidebar({ page, onChange, appVersion, onCheckUpdate, tickerEvent
           )
         })}
       </div>
+      {recentCommandPages.length > 0 && (
+        <>
+          <div
+            aria-hidden
+            style={{
+              height: 1,
+              background: 'var(--border-default)',
+              margin: '2px 6px 0'
+            }}
+          />
+          <div
+            data-testid="sidebar-recent-section"
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+              paddingTop: 8
+            }}
+          >
+          {!iconOnly && (
+            <div style={{ padding: '0 10px', fontSize: 11, color: 'var(--muted)', opacity: 0.85, fontWeight: 600, letterSpacing: '0.03em' }}>
+              最近打开
+            </div>
+          )}
+          {recentCommandPages.map((item) => {
+            const itemTestId = `sidebar-recent-item-${testIdSafe(item.commandName)}`
+            const removeTestId = `sidebar-recent-remove-${testIdSafe(item.commandName)}`
+            const itemLabel = item.commandName
+            const isHovered = hoveredRecentCommand === item.commandName
+            return (
+              <div
+                key={`${item.commandName}-${item.page}`}
+                onMouseEnter={() => setHoveredRecentCommand(item.commandName)}
+                onMouseLeave={() => setHoveredRecentCommand((prev) => (prev === item.commandName ? null : prev))}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6
+                }}
+              >
+                <button
+                  data-testid={itemTestId}
+                  type="button"
+                  title={itemLabel}
+                  onClick={() => onOpenRecentCommandPage(item)}
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: iconOnly ? 'center' : 'flex-start',
+                    gap: iconOnly ? 0 : 8,
+                    padding: iconOnly ? '10px 8px' : '8px 10px',
+                    borderRadius: 'var(--radius-xs)',
+                    border: 'none',
+                    background: 'transparent',
+                    color: 'var(--text-dim)',
+                    opacity: 0.92,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    transition: 'background-color var(--motion-normal) var(--ease-standard), color var(--motion-normal) var(--ease-standard)'
+                  }}
+                  className="sidebar-nav-button"
+                >
+                  {!iconOnly && (
+                    <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 }}>
+                      {itemLabel}
+                    </span>
+                  )}
+                </button>
+                {!iconOnly && (
+                  <button
+                    data-testid={removeTestId}
+                    type="button"
+                    aria-label={`删除最近命令 ${item.commandName}`}
+                    title="删除最近入口"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      onRemoveRecentCommandPage(item.commandName)
+                    }}
+                    style={{
+                      flexShrink: 0,
+                      width: 22,
+                      height: 22,
+                      borderRadius: 6,
+                      border: '1px solid color-mix(in srgb, var(--border-subtle) 78%, transparent)',
+                      background: 'transparent',
+                      color: 'var(--text-dim)',
+                      opacity: isHovered ? 0.72 : 0,
+                      pointerEvents: isHovered ? 'auto' : 'none',
+                      cursor: 'pointer',
+                      lineHeight: 1,
+                      transition:
+                        'opacity var(--motion-normal) var(--ease-standard), color var(--motion-normal) var(--ease-standard), border-color var(--motion-normal) var(--ease-standard)'
+                    }}
+                    onMouseEnter={(event) => {
+                      event.currentTarget.style.opacity = '0.9'
+                    }}
+                    onMouseLeave={(event) => {
+                      event.currentTarget.style.opacity = '0.72'
+                    }}
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            )
+          })}
+          </div>
+        </>
+      )}
 
       <div
+        data-testid="sidebar-footer"
         style={{
           marginTop: 'auto',
           padding: iconOnly ? '0 2px' : '0 8px',
           display: 'flex',
           flexDirection: 'column',
-          gap: iconOnly ? 6 : 8,
+          gap: iconOnly ? 6 : 10,
           alignItems: iconOnly ? 'stretch' : 'stretch',
           minWidth: 0
         }}

@@ -39,7 +39,7 @@ export function chipStyle(active: boolean): CSSProperties {
   }
 }
 
-export function buttonStyle(variant: 'primary' | 'muted' | 'warn' | 'danger'): CSSProperties {
+export function buttonStyle(variant: 'primary' | 'muted' | 'outline' | 'warn' | 'danger'): CSSProperties {
   if (variant === 'primary') {
     return {
       border: '1px solid var(--text)',
@@ -55,6 +55,22 @@ export function buttonStyle(variant: 'primary' | 'muted' | 'warn' | 'danger'): C
         'transform var(--motion-fast) var(--ease-out-strong), background-color var(--motion-normal) var(--ease-standard), border-color var(--motion-normal) var(--ease-standard), color var(--motion-normal) var(--ease-standard), box-shadow var(--motion-normal) var(--ease-standard)',
       boxShadow: '0 1px 0 color-mix(in srgb, var(--text) 26%, transparent)',
       ...pressScalePrimary
+    }
+  }
+  if (variant === 'outline') {
+    return {
+      border: borderStrong,
+      borderRadius: radiusMd,
+      padding: '8px 12px',
+      fontSize: '12px',
+      fontWeight: 600,
+      background: 'transparent',
+      color: 'var(--text)',
+      fontFamily: 'var(--font-ui)',
+      cursor: 'pointer',
+      transition:
+        'transform var(--motion-fast) var(--ease-out-strong), background-color var(--motion-normal) var(--ease-standard), border-color var(--motion-normal) var(--ease-standard), color var(--motion-normal) var(--ease-standard), box-shadow var(--motion-normal) var(--ease-standard)',
+      ...pressScaleMuted
     }
   }
   if (variant === 'warn') {

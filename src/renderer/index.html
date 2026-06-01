@@ -4,6 +4,19 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>终端管理</title>
+    <script>
+      ;(() => {
+        try {
+          const raw = window.localStorage.getItem('shell-manage-theme')
+          const theme = raw === 'light' ? 'light' : 'dark'
+          document.documentElement.dataset.theme = theme
+          document.documentElement.style.background = theme === 'light' ? '#F6F7FB' : '#121417'
+        } catch {
+          document.documentElement.dataset.theme = 'dark'
+          document.documentElement.style.background = '#121417'
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

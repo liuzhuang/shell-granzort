@@ -3,7 +3,8 @@ import yaml from 'js-yaml'
 import { AppConfig, CommandConfig, PresetConfig, CommandMode } from '../../shared/types'
 import { buttonStyle, chipStyle, inputStyle } from '../lib/uiStyles'
 
-type VisualTab = 'commands' | 'presets' | 'settings'
+export type VisualConfigTab = 'commands' | 'presets' | 'settings'
+type VisualTab = VisualConfigTab
 
 const TABS: { id: VisualTab; label: string }[] = [
   { id: 'commands', label: '命令列表' },
@@ -21,6 +22,20 @@ const MODES: { value: CommandMode, label: string }[] = [
   { value: 'terminal', label: '作为交互型终端打开 (Terminal)' }
 ]
 
+function splitInteractiveCommands(command: string): string[] {
+  const segments = command.split('|||').map((item) => item.trim())
+  return segments.some((item) => item.length > 0) ? segments : ['']
+}
+
+function joinInteractiveCommands(segments: string[]): string {
+  return segments.map((item) => item.trim()).join(' ||| ')
+}
+
+function compactInteractiveSegments(segments: string[]): string[] {
+  const cleaned = segments.map((item) => item.trim()).filter((item) => item.length > 0)
+  return cleaned.length > 0 ? cleaned : ['']
+}
+
 export function VisualConfigEditor({ value, onChange }: VisualConfigEditorProps) {
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -36,6 +51,7 @@ export function VisualConfigEditor({ value, onChange }: VisualConfigEditorProps)
         if (!Array.isArray(parsed.presets)) parsed.presets = []
         if (!parsed.settings) parsed.settings = { llm: { endpoint: '', apiKey: '', model: '' }, themePreset: 'coder', logBufferLines: 5000 }
         if (!parsed.settings.themePreset) parsed.settings.themePreset = 'coder'
+        if (!Array.isArray(parsed.settings.sshKeys)) parsed.settings.sshKeys = []
         setConfig(parsed)
         setError(null)
       }
@@ -99,7 +115,8 @@ export function VisualConfigEditor({ value, onChange }: VisualConfigEditorProps)
       name: '新命令',
       command: 'echo "hello"',
       tags: [],
-      mode: 'service'
+      mode: 'service',
+      autoRestart: false
     }
     // 向前插入，保证最新添加的命令在最上方
     updateConfig({ ...config, commands: [newCommand, ...config.commands] })
@@ -108,6 +125,33 @@ export function VisualConfigEditor({ value, onChange }: VisualConfigEditorProps)
   const removeCommand = (index: number) => {
     const newCommands = config.commands.filter((_, i) => i !== index)
     updateConfig({ ...config, commands: newCommands })
+  }
+
+  const sshKeys = config?.settings.sshKeys || []
+
+  const renderSshKeySelector = (cmd: CommandConfig, idx: number) => {
+    const isSsh = /^\s*ssh(\s|$)/i.test(cmd.command)
+    if (!isSsh) return null
+    return (
+      <div style={{ marginBottom: 12 }}>
+        <label style={secondaryLabelStyle}>SSH 密钥</label>
+        <select
+          style={{ ...selectStyle, color: 'var(--muted)' }}
+          value={cmd.sshKeyId || ''}
+          onChange={(e) => handleCommandChange(idx, 'sshKeyId', e.target.value || undefined)}
+        >
+          <option value="">不绑定密钥</option>
+          {sshKeys.map((key) => (
+            <option key={key.id} value={key.id}>
+              {key.label} ({key.id})
+            </option>
+          ))}
+        </select>
+        <p style={{ margin: '6px 0 0', fontSize: 11, color: 'var(--muted)', lineHeight: 1.5 }}>
+          团队共享时命令写 <code style={{ fontSize: 11 }}>ssh user@host</code>，每人本地导入同名密钥后自动注入 <code style={{ fontSize: 11 }}>-i</code>。
+        </p>
+      </div>
+    )
   }
 
   const handlePresetChange = (index: number, field: keyof PresetConfig, val: any) => {
@@ -266,14 +310,90 @@ export function VisualConfigEditor({ value, onChange }: VisualConfigEditorProps)
                   </select>
                 </div>
               </div>
+              {cmd.mode === 'service' || cmd.mode === 'terminal' ? (
+                <label
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    marginBottom: 12,
+                    fontSize: 12,
+                    color: 'var(--text)'
+                  }}
+                >
+                  <input
+                    data-testid={`visual-command-auto-restart-${idx}`}
+                    type="checkbox"
+                    checked={Boolean(cmd.autoRestart)}
+                    onChange={(event) => handleCommandChange(idx, 'autoRestart', event.target.checked)}
+                  />
+                  异常退出时自动重连（最多 3 次）
+                </label>
+              ) : null}
               <div style={{ marginBottom: 12 }}>
-                <label style={secondaryLabelStyle}>执行命令</label>
-                <input 
-                  style={{ ...inputStyle, color: 'var(--muted)' }} 
-                  value={cmd.command} 
-                  onChange={e => handleCommandChange(idx, 'command', e.target.value)} 
-                />
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
+                  <label style={{ ...secondaryLabelStyle, marginBottom: 0 }}>
+                    {cmd.mode === 'terminal' ? '执行命令' : '执行命令'}
+                  </label>
+                  {cmd.mode === 'terminal' ? (
+                    <button
+                      type="button"
+                      data-testid={`visual-command-plus-${idx}`}
+                      style={{ ...buttonStyle('muted'), padding: '2px 8px', fontSize: 13, lineHeight: 1.2 }}
+                      onClick={() => {
+                        const segments = splitInteractiveCommands(cmd.command)
+                        handleCommandChange(idx, 'command', joinInteractiveCommands([...segments, '']))
+                      }}
+                    >
+                      +
+                    </button>
+                  ) : null}
+                </div>
+                {cmd.mode === 'terminal' ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {splitInteractiveCommands(cmd.command).map((segment, segmentIndex, list) => (
+                      <div key={`${idx}-segment-${segmentIndex}`} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 6 }}>
+                        <input
+                          data-testid={`visual-command-segment-input-${idx}-${segmentIndex}`}
+                          style={{ ...inputStyle, color: 'var(--muted)' }}
+                          value={segment}
+                          onChange={(event) => {
+                            const nextSegments = [...list]
+                            nextSegments[segmentIndex] = event.target.value
+                            handleCommandChange(idx, 'command', joinInteractiveCommands(nextSegments))
+                          }}
+                          placeholder={segmentIndex === 0 ? '例如：ssh user@host' : '例如：tail -f /path/to/log'}
+                        />
+                        <button
+                          type="button"
+                          data-testid={`visual-command-segment-remove-${idx}-${segmentIndex}`}
+                          disabled={list.length <= 1}
+                          style={{ ...buttonStyle('muted'), padding: '0 10px', fontSize: 14, lineHeight: 1 }}
+                          onMouseDown={(event) => {
+                            event.preventDefault()
+                            event.stopPropagation()
+                          }}
+                          onClick={() => {
+                            if (list.length <= 1) return
+                            const nextSegments = [...list]
+                            nextSegments.splice(segmentIndex, 1)
+                            handleCommandChange(idx, 'command', joinInteractiveCommands(compactInteractiveSegments(nextSegments)))
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <input 
+                    style={{ ...inputStyle, color: 'var(--muted)' }} 
+                    value={cmd.command} 
+                    onChange={e => handleCommandChange(idx, 'command', e.target.value)} 
+                  />
+                )}
               </div>
+              {renderSshKeySelector(cmd, idx)}
               <div>
                 <label style={secondaryLabelStyle}>
                   标签 (Tags) 
@@ -367,7 +487,7 @@ export function VisualConfigEditor({ value, onChange }: VisualConfigEditorProps)
                       </select>
                       <input 
                         type="number" 
-                        placeholder="延迟(ms)" 
+                        placeholder="延迟(秒)" 
                         style={{ ...inputStyle, width: 80 }} 
                         value={item.delay || 0}
                         onChange={e => {
@@ -390,7 +510,7 @@ export function VisualConfigEditor({ value, onChange }: VisualConfigEditorProps)
                   <button 
                     style={{ ...buttonStyle('muted'), alignSelf: 'flex-start', marginTop: 4 }}
                     onClick={() => {
-                      handlePresetChange(idx, 'sequence', [...preset.sequence, { command: '', delay: 1000 }])
+                      handlePresetChange(idx, 'sequence', [...preset.sequence, { command: '', delay: 5 }])
                     }}
                   >
                     + 添加步骤

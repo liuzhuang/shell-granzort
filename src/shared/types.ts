@@ -1,5 +1,83 @@
 export type CommandMode = 'service' | 'terminal'
 export type ThemePreset = 'system' | 'coder' | 'girl'
+export type AnalyticsEventType = 'ui_action' | 'command_lifecycle' | 'feature_usage'
+export type AnalyticsResult = 'success' | 'fail' | 'unknown'
+
+export interface AnalyticsEvent {
+  schemaVersion: number
+  eventId: string
+  eventType: AnalyticsEventType
+  featureKey: string
+  action: string
+  timestamp: number
+  sessionId: string
+  page?: string
+  result?: AnalyticsResult
+  durationMs?: number
+  context?: Record<string, string | number | boolean | null>
+}
+
+export interface AnalyticsSummaryWindow {
+  startAt: number
+  endAt: number
+  timezone: string
+  days: number
+}
+
+export interface AnalyticsFeatureUsageItem {
+  featureKey: string
+  count: number
+  sessionCoverage: number
+  successRate: number
+  /** command_lifecycle 等 idle/unknown 事件占比 */
+  idleRate?: number
+}
+
+export interface AnalyticsLowUsageCandidate {
+  featureKey: string
+  count: number
+  sessionCoverage: number
+  lastSeenAt?: number
+  protected: boolean
+  reason: string
+}
+
+export interface AnalyticsFailureTopItem {
+  featureKey: string
+  errorCode: string
+  count: number
+  failRate: number
+}
+
+export interface AnalyticsFlowTopItem {
+  from: string
+  to: string
+  count: number
+}
+
+export interface AnalyticsSummary3d {
+  schemaVersion: number
+  generatedAt: number
+  window: AnalyticsSummaryWindow
+  overview: {
+    totalEvents: number
+    totalSessions: number
+    activeFeatures: number
+    overallSuccessRate: number
+  }
+  featureUsageTop: AnalyticsFeatureUsageItem[]
+  featureLowUsageCandidates: AnalyticsLowUsageCandidate[]
+  failureTop: AnalyticsFailureTopItem[]
+  flowTop: AnalyticsFlowTopItem[]
+  protectedFeatures: string[]
+}
+
+export interface AnalyticsViewerSnapshot {
+  latestSummary: AnalyticsSummary3d | null
+  recentEvents: AnalyticsEvent[]
+  eventFileCount: number
+  summaryFileCount: number
+}
 
 export interface CommandHealthCheckConfig {
   type: 'port' | 'log'
@@ -11,15 +89,53 @@ export interface CommandHealthCheckConfig {
   failureThreshold?: number
 }
 
+export interface TerminalStartupStep {
+  /**
+   * 等待后再执行当前步骤（毫秒）。可与 waitForOutputPattern 组合使用。
+   */
+  delayMs?: number
+  /**
+   * 当终端输出命中该正则后再执行当前步骤（字符串形式的 RegExp）。
+   */
+  waitForOutputPattern?: string
+  /**
+   * waitForOutputPattern 的超时时间（毫秒），默认 15000。
+   */
+  timeoutMs?: number
+  /**
+   * 实际写入 PTY 的命令内容。
+   */
+  send: string
+  /**
+   * 是否自动追加换行，默认 true。
+   */
+  sendNewline?: boolean
+  /**
+   * 步骤展示名，仅用于日志提示。
+   */
+  label?: string
+}
+
+export interface SshKeyConfig {
+  id: string
+  label: string
+  createdAt?: string
+}
+
 export interface CommandConfig {
   name: string
   command: string
   tags: string[]
   mode?: CommandMode
+  /** 引用 settings.sshKeys 中的密钥 ID，执行 SSH 时自动注入 -i */
+  sshKeyId?: string
   webUrl?: string
+  iconDataUrl?: string
+  iconFilePath?: string
   autoRestart?: boolean
   maxRestarts?: number
   healthCheck?: CommandHealthCheckConfig
+  terminalStartupSteps?: TerminalStartupStep[]
 }
 
 export interface PresetSequenceItem {
@@ -32,9 +148,159 @@ export interface PresetConfig {
   sequence: PresetSequenceItem[]
 }
 
+export interface LogViewPreset {
+  name: string
+  commandNames: string[]
+  updatedAt?: string
+}
+
+export interface ProjectDirectory {
+  id: string
+  name: string
+  path: string
+  createdAt?: string
+}
+
+export type ProjectDirectoryStatus = 'ok' | 'missing' | 'permission_denied'
+
+export interface ProjectDirectoryValidation {
+  id: string
+  name: string
+  path: string
+  status: ProjectDirectoryStatus
+}
+
+export interface DeployScriptConfig {
+  id: string
+  name: string
+  content: string
+  /** 引用 settings.sshKeys[].id */
+  sshKeyRef?: string
+  deployTarget?: string
+  remoteDir?: string
+  createdAt?: string
+}
+
+export interface TemplatePreviewResult {
+  rendered: string
+  slotValues: Record<string, string | undefined>
+  missingSlots: string[]
+  unknownSlots: string[]
+  knownSlots: string[]
+  usedSlots: string[]
+}
+
+export interface TemplatePreviewRequest {
+  content: string
+  projectDirectories?: ProjectDirectory[]
+}
+
+export interface ScriptToTemplateRequest {
+  script: string
+  projectDirectories?: ProjectDirectory[]
+}
+
+export interface ScriptToTemplateResult {
+  content: string
+  sshKeyRef?: string
+  matchedProjectId?: string
+  replacements: Array<{ from: string; slot: string }>
+}
+
+export interface DeployScriptExecuteRequest {
+  scriptId: string
+  content?: string
+}
+
+export interface DeployScriptExecuteResult {
+  ok: boolean
+  terminalCommandName: string
+  scriptId: string
+  scriptName: string
+}
+
+export interface DeployScriptValidateRequest {
+  scriptId?: string
+  content?: string
+}
+
+export interface DeployScriptValidateResult {
+  ok: boolean
+  missingSlots: string[]
+  unknownSlots: string[]
+  usedSlots: string[]
+}
+
+/** 与 config.yaml 中 projectDirectories / deployScripts 段落一致；分享时不含 path、id、sshKeyRef */
+export interface CollaborationShareProjectEntry {
+  name: string
+}
+
+export interface CollaborationShareScriptEntry {
+  name: string
+  content: string
+}
+
+export interface CollaborationSharePayload {
+  projectDirectories?: CollaborationShareProjectEntry[]
+  deployScripts?: CollaborationShareScriptEntry[]
+}
+
+export type CollaborationScriptConflictAction = 'skip' | 'overwrite'
+
+export interface CollaborationImportProjectRow {
+  name: string
+  selected: boolean
+  path: string | undefined
+  existingPath: string | undefined
+}
+
+export interface CollaborationImportScriptRow {
+  name: string
+  content: string
+  selected: boolean
+  hasConflict: boolean
+  conflictAction: CollaborationScriptConflictAction
+}
+
+export interface CollaborationImportDraft {
+  share: CollaborationSharePayload
+  projects: CollaborationImportProjectRow[]
+  scripts: CollaborationImportScriptRow[]
+}
+
+export interface CollaborationExportProjectRow {
+  id: string
+  name: string
+  selected: boolean
+}
+
+export interface CollaborationExportScriptRow {
+  id: string
+  name: string
+  content: string
+  selected: boolean
+}
+
+export interface CollaborationExportDraft {
+  projects: CollaborationExportProjectRow[]
+  scripts: CollaborationExportScriptRow[]
+}
+
+export interface CollaborationMergeResult {
+  projectsAdded: number
+  projectsSkipped: number
+  scriptsAdded: number
+  scriptsOverwritten: number
+  scriptsSkipped: number
+}
+
 export interface AppConfig {
   commands: CommandConfig[]
   presets: PresetConfig[]
+  projectDirectories?: ProjectDirectory[]
+  deployScripts?: DeployScriptConfig[]
+  activeDeployScriptId?: string
   dashboard?: DashboardConfig
   settings: {
     llm: {
@@ -49,9 +315,25 @@ export interface AppConfig {
       apiKey?: string
       project?: string
     }
+    tagOrder?: string[]
+    logViewPresets?: LogViewPreset[]
     themePreset?: ThemePreset
     logBufferLines: number
+    /** SSH 密钥元数据；私钥文件保存在 ~/.shell-manage/keys/ */
+    sshKeys?: SshKeyConfig[]
   }
+}
+
+export interface SshKeyImportRequest {
+  label: string
+  content: string
+  id?: string
+}
+
+export interface SshKeyImportResponse {
+  ok: boolean
+  id: string
+  label: string
 }
 
 export type DashboardRiskLevel = 'safe' | 'review' | 'blocked'
@@ -320,6 +602,8 @@ export interface TerminalStatusPayload {
   sessionId?: string
   state: 'running' | 'idle'
   exitCode?: number
+  message?: string
+  restarts?: number
 }
 
 /** 当前主进程中活跃的交互式 Shell（PTY）会话摘要，用于顶栏实例列表等 */
@@ -350,6 +634,17 @@ export interface DetectProjectsResult {
   canceled: boolean
   rootPath?: string
   projects: DetectedProject[]
+}
+
+export interface ProjectSubdirectoryItem {
+  name: string
+  path: string
+}
+
+export interface ListProjectSubdirectoriesResult {
+  canceled: boolean
+  rootPath?: string
+  subdirectories: ProjectSubdirectoryItem[]
 }
 
 export interface ProcessInspectorItem {

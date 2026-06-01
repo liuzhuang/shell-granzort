@@ -1,184 +1,89 @@
-# ShellManage
+# Shell 管理（v3）
 
-基于 **Electron**、**React** 与 **TypeScript** 的桌面应用，以 **YAML** 为唯一配置源，在界面中管理 Shell 命令、预设、终端与仪表盘等能力。
-
-## 功能概览
-
-- **通过 UI 启动项目**：在图形界面中选择并启动已配置的项目与工作流，无需在终端里手动敲路径或命令。
-- **YAML 驱动**：配置即数据，支持可视化编辑与校验。
-- **AI 辅助日志命令**：结合 LangChain / LangGraph 等能力，由 AI 根据上下文**生成或补全**与日志查看、检索相关的 Shell 命令（具体效果依赖模型与提示策略）。
-- **终端与进程**：集成终端模拟与进程管理（本地 Shell 会话）。
-- **监控**：提供监控与仪表盘相关界面与能力，**当前仍是短板**，后续会持续加强可观测性与稳定性（如指标、告警、历史对比等）。
-- **自动更新**：集成 `electron-updater`（需按你的发布渠道配置更新源）。
-
-## 界面预览
-
-### 命令列表
-
-在图形界面中浏览命令卡片，使用「快捷启动」「打开窗口」等操作启动任务，并支持按标签筛选与搜索。
-
-![命令列表：Shell Command Center](ui/ui1.png)
-
-### AI 日志
-
-自然语言提问，走「生成命令 → 在草稿区微调 → 在执行终端运行」的流程；可收藏常用命令。
-
-![AI 日志：会话与命令草稿、执行终端](ui/ui2.png)
-
-### AI 服务器监控
-
-查看 CPU、内存、磁盘、网络等指标，以及 AI 洞察（拉取终端缓冲并分析）；监控能力仍在持续完善中。
-
-![AI 服务器监控：资源指标与 AI 洞察](ui/ui3.png)
-
-### 编辑配置文件
-
-在表单中维护命令、预设与全局设置，也可切换至源码编辑；配置仍以 YAML 为底层存储。
-
-![编辑配置文件：可视化表单与命令条目](ui/ui4.png)
+基于 Electron + React + TypeScript 的桌面应用，使用 YAML 作为唯一配置源来管理 Shell 命令、预设与查询能力。
 
 ## 环境要求
 
-- **macOS**（当前主要开发与验证平台）
-- **Node.js** `>= 20`（建议使用 LTS）
-- **npm** `>= 9`
+- macOS（当前主要在 macOS 上开发）
+- Node.js `>= 20`（建议使用 LTS）
+- npm `>= 9`
+
+可用以下命令确认版本：
 
 ```bash
 node -v
 npm -v
 ```
 
-## 安装依赖
+## 开发环境构建与运行
 
-在项目根目录：
+### 1) 安装依赖
+
+在项目根目录执行：
 
 ```bash
 npm install
 ```
 
-安装后会执行 `postinstall`，对 `node-pty` 等原生模块做 **Electron  ABI 重编译**（`electron-rebuild`）。若失败，可手动执行：
-
-```bash
-npm run rebuild:native
-```
-
-## 开发
+### 2) 启动开发环境
 
 ```bash
 npm run dev
 ```
 
-会启动 Electron 主进程、预加载脚本与 Renderer（Vite）开发模式，支持热更新联动。
+说明：
+- 会启动 Electron + Renderer（Vite）开发模式
+- 支持主进程、预加载、前端代码联动开发
 
-**类型检查：**
+### 3) 类型检查（建议开发时常用）
 
 ```bash
 npm run typecheck
 ```
 
-## 构建
+## 生产环境构建
 
-**标准生产构建（不打包安装包）：**
+### 1) 执行构建
 
 ```bash
 npm run build
 ```
 
-产物目录：
+### 2) 构建产物目录
 
-| 路径 | 说明 |
-|------|------|
-| `dist/main` | Electron 主进程 |
-| `dist/preload` | Preload 脚本 |
-| `dist/renderer` | 前端静态资源 |
+构建完成后会生成：
 
-**预览构建结果：**
+- `dist/main`：Electron 主进程产物
+- `dist/preload`：Preload 脚本产物
+- `dist/renderer`：前端页面静态资源产物
+
+### 3) 预览构建结果（可选）
 
 ```bash
 npm run preview
 ```
 
-## macOS 安装包与发布
+> 说明：当前脚本已完成“生产构建”，但尚未接入安装包打包（如 `.dmg`）流程。若需要分发安装包，可在下一步接入 `electron-builder` 或 `electron-forge`。
 
-使用 **electron-builder** 生成 `.dmg` 等产物（配置见 `package.json` 的 `build` 字段）：
-
-```bash
-npm run build:installer:mac
-```
-
-校验安装包（脚本见 `scripts/verify-installer.sh`）：
+## 常用命令汇总
 
 ```bash
-npm run verify:installer:mac
+npm run dev        # 开发环境
+npm run typecheck  # TS 类型检查
+npm run build      # 生产构建
+npm run preview    # 构建结果预览
 ```
 
-一键：构建安装包并校验：
+## ShellManage Assistant Skill（推广与配置引导）
 
-```bash
-npm run e2e:installer:mac
-```
+Skill 源码位于 `skills/shell-manage-assistant/`（**不是** `.cursor/skills/`，后者是用户安装目录）。
 
-完整发布流程（脚本见 `scripts/release-mac.sh`）：
+用途：
 
-```bash
-npm run release:mac
-```
+- 指导同事下载、安装、升级 `shell-manage`
+- 回答 ShellManage 使用问题
+- 按标准流程引导配置变更（先校验、后确认、再写入）
 
-## 端到端测试
+配套知识库已内置在 `skills/shell-manage-assistant/references/`，其中下载入口由 `references/distribution-manifest.yaml` 维护（当前清单为模板占位符，需替换为真实分发 URL/SHA 后才能用于生产安装引导）。
 
-依赖 **Playwright**，会先执行生产构建再跑测试：
-
-```bash
-npm run test:e2e              # 无头
-npm run test:e2e:headed       # 有界面
-```
-
-布局稳定性相关用例（独立配置 `playwright.video.config.ts`）：
-
-```bash
-npm run test:e2e:layout:video
-```
-
-## 版本号
-
-仅递增 `package.json` 版本（不打 git 标签）：
-
-```bash
-npm run bump:patch
-npm run bump:minor
-npm run bump:major
-```
-
-## 致谢与开源引用
-
-本项目构建于大量优秀的开源软件之上，特此致谢（按技术领域分组，排名不分先后）：
-
-| 项目 | 说明 |
-|------|------|
-| [Electron](https://www.electronjs.org/) | 跨平台桌面应用运行时 |
-| [React](https://react.dev/) | UI 库 |
-| [TypeScript](https://www.typescriptlang.org/) | 类型化的 JavaScript 超集 |
-| [Vite](https://vitejs.dev/) | 前端构建与开发服务器 |
-| [electron-vite](https://electron-vite.org/) | Electron + Vite 一体化工程方案 |
-| [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react) | Vite 的 React 插件 |
-| [CodeMirror 6](https://codemirror.net/) | 编辑器内核；YAML 语言包 [@codemirror/lang-yaml](https://github.com/codemirror/lang-yaml) |
-| [xterm.js](https://xtermjs.org/) | 终端模拟器 UI（`@xterm/xterm`、`@xterm/addon-fit`） |
-| [node-pty](https://github.com/microsoft/node-pty) | 伪终端，驱动真实 Shell 会话 |
-| [js-yaml](https://github.com/nodeca/js-yaml) | YAML 解析与序列化 |
-| [chokidar](https://github.com/paulmillr/chokidar) | 文件监听 |
-| [shell-env](https://github.com/sindresorhus/shell-env) | 获取登录 Shell 环境变量 |
-| [tree-kill](https://github.com/pkrumins/node-tree-kill) | 进程树终止 |
-| [LangChain](https://github.com/langchain-ai/langchain) / [@langchain/core](https://github.com/langchain-ai/langchainjs) | LLM 应用编排 |
-| [LangGraph](https://github.com/langchain-ai/langgraph) | 图状态与 Agent 工作流 |
-| [@langchain/langgraph-checkpoint-sqlite](https://github.com/langchain-ai/langgraphjs) | LangGraph 的 SQLite 检查点（依赖 SQLite 原生绑定生态） |
-| [Deep Agents](https://github.com/langchain-ai/deepagents) | 深度 Agent 能力封装 |
-| [electron-builder](https://www.electron.build/) | 应用打包与安装包生成 |
-| [electron-updater](https://github.com/electron-userland/electron-builder/tree/master/packages/electron-updater) | 应用内自动更新 |
-| [@electron/rebuild](https://github.com/electron/rebuild) | 为 Electron 重编译原生 Node 模块 |
-| [Playwright](https://playwright.dev/) | 端到端与浏览器自动化测试 |
-
-若你分发本应用的二进制或安装包，请同时遵守各依赖的许可证要求（多数为 MIT / Apache-2.0 等，请以各包 `package.json` 与仓库声明为准）。
-
----
-
-**许可证**：本项目以 `package.json` 中的 `license` 字段为准（当前为 ISC）。
+安装方式见 [skills/shell-manage-assistant/INSTALL.md](skills/shell-manage-assistant/INSTALL.md)。

@@ -6,13 +6,9 @@ import { buttonStyle, inputStyle } from '../lib/uiStyles'
 
 type TimelineEntry = { key: string; at: number; role: 'user' | 'assistant'; content: string }
 
-const SPLIT_RATIO_STORAGE_KEY = 'query.layout.splitRatio.v1'
-const LAST_QUERY_COMMAND_KEY = 'query.lastSelectedCommand.v1'
-const MIN_LEFT_RATIO = 0.45
-const MAX_LEFT_RATIO = 0.75
-const COMPACT_ENTER_WIDTH = 1160
-const COMPACT_EXIT_WIDTH = 1220
 const CONFIRM_EXECUTE_STORAGE_KEY = 'query.ai.confirmExecute.v1'
+const QUERY_TERMINAL_SOURCE = 'query'
+const QUERY_TERMINAL_SESSION_PREFIX = 'query'
 const SECTION_STYLE = {
   border: '1px solid var(--border-subtle)',
   borderRadius: 14,
@@ -38,6 +34,8 @@ export function QueryPage(props: {
   fillCommandFromFavorite: (command: string) => void
   addFavoriteCommand: () => void
   removeFavoriteCommand: (command: string) => void
+  active: boolean
+  onTrackAction?: (featureKey: string, action: string, result?: 'success' | 'fail' | 'unknown') => void
 }) {
   const {
     queryInput,
@@ -54,38 +52,32 @@ export function QueryPage(props: {
     translate,
     selectCommand,
     onActionError,
+    active,
     favoriteCommands,
     fillCommandFromFavorite,
     addFavoriteCommand,
-    removeFavoriteCommand
+    removeFavoriteCommand,
+    onTrackAction
   } = props
 
-  const [showFavoritesDialog, setShowFavoritesDialog] = useState(false)
-  const [favoriteSearch, setFavoriteSearch] = useState('')
-  const [isCompactLayout, setIsCompactLayout] = useState<boolean>(() => {
-    const width = getViewportWidth()
-    return resolveCompactLayout(width, false)
-  })
+  const [showHistoryDialog, setShowHistoryDialog] = useState(false)
+  const [showCommandPopover, setShowCommandPopover] = useState(false)
   const [autoFollowTimeline, setAutoFollowTimeline] = useState(true)
-  const [leftRatio, setLeftRatio] = useState<number>(() => loadSplitRatio())
-  const [isDraggingSplit, setIsDraggingSplit] = useState(false)
   const [showTerminalFullscreen, setShowTerminalFullscreen] = useState(false)
   const [terminalSessionState, setTerminalSessionState] = useState<'running' | 'idle'>('idle')
   const [pendingAiCommand, setPendingAiCommand] = useState('')
   const [confirmBeforeExecute, setConfirmBeforeExecute] = useState<boolean>(() => loadConfirmBeforeExecute())
-  const rootRef = useRef<HTMLDivElement | null>(null)
   const timelineRef = useRef<HTMLDivElement | null>(null)
   const inlineHostRef = useRef<HTMLDivElement | null>(null)
-  const terminalPanelRef = useRef<HTMLDivElement | null>(null)
+  const commandPopoverRef = useRef<HTMLDivElement | null>(null)
   const composingRef = useRef(false)
+  const terminalPrinterRef = useRef<((content: string) => void) | null>(null)
+  const printedChatCountRef = useRef(0)
+  const printedStreamingNoticeRef = useRef(false)
 
   const liveAssistantText = isStreaming ? (streamingText.trim() || 'AI 正在分析中...') : ''
   const activeCommandText = (isStreaming ? streamingText : commandInput).trim()
-  const filteredFavorites = useMemo(() => {
-    const keyword = favoriteSearch.trim().toLowerCase()
-    if (!keyword) return favoriteCommands
-    return favoriteCommands.filter((item) => item.toLowerCase().includes(keyword))
-  }, [favoriteCommands, favoriteSearch])
+  const queryTerminalSessionId = useMemo(() => createQueryTerminalSessionId(selectedCommand), [selectedCommand])
   const timelineEntries = useMemo<TimelineEntry[]>(
     () =>
       chatHistory.map((item, idx) => ({
@@ -98,33 +90,6 @@ export function QueryPage(props: {
   )
 
   useEffect(() => {
-    const onResize = () => {
-      const width = getViewportWidth()
-      setIsCompactLayout((prev) => resolveCompactLayout(width, prev))
-    }
-    onResize()
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
-  }, [])
-
-  useEffect(() => {
-    if (!selectedCommand) return
-    try {
-      window.localStorage.setItem(LAST_QUERY_COMMAND_KEY, selectedCommand)
-    } catch {
-      // ignore storage errors
-    }
-  }, [selectedCommand])
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(SPLIT_RATIO_STORAGE_KEY, String(leftRatio))
-    } catch {
-      // ignore storage errors
-    }
-  }, [leftRatio])
-
-  useEffect(() => {
     try {
       window.localStorage.setItem(CONFIRM_EXECUTE_STORAGE_KEY, confirmBeforeExecute ? '1' : '0')
     } catch {
@@ -133,45 +98,82 @@ export function QueryPage(props: {
   }, [confirmBeforeExecute])
 
   useEffect(() => {
-    if (!isDraggingSplit) return
-    const onMouseMove = (event: MouseEvent) => {
-      if (!rootRef.current) return
-      const rect = rootRef.current.getBoundingClientRect()
-      if (rect.width <= 0) return
-      const raw = (event.clientX - rect.left) / rect.width
-      const next = Math.min(MAX_LEFT_RATIO, Math.max(MIN_LEFT_RATIO, raw))
-      setLeftRatio(next)
-    }
-    const stopDrag = () => setIsDraggingSplit(false)
-    window.addEventListener('mousemove', onMouseMove)
-    window.addEventListener('mouseup', stopDrag)
-    return () => {
-      window.removeEventListener('mousemove', onMouseMove)
-      window.removeEventListener('mouseup', stopDrag)
-    }
-  }, [isDraggingSplit])
-
-  useEffect(() => {
     if (!autoFollowTimeline) return
     const el = timelineRef.current
     if (!el) return
     el.scrollTop = el.scrollHeight
   }, [timelineEntries, liveAssistantText, autoFollowTimeline])
 
+  useEffect(() => {
+    if (!showCommandPopover) return
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node
+      if (commandPopoverRef.current && !commandPopoverRef.current.contains(target)) {
+        setShowCommandPopover(false)
+      }
+    }
+    const onKeydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setShowCommandPopover(false)
+    }
+    window.addEventListener('mousedown', onPointerDown)
+    window.addEventListener('keydown', onKeydown)
+    return () => {
+      window.removeEventListener('mousedown', onPointerDown)
+      window.removeEventListener('keydown', onKeydown)
+    }
+  }, [showCommandPopover])
+
   useTerminalSession({
     hostRef: inlineHostRef,
     commandName: selectedCommand,
-    enabled: true,
+    sessionId: queryTerminalSessionId,
+    enabled: active,
+    onTerminalReady: (printer) => {
+      terminalPrinterRef.current = printer
+      if (printer) {
+        printedChatCountRef.current = chatHistory.length
+        printedStreamingNoticeRef.current = false
+      }
+    },
     onStatusChange: setTerminalSessionState,
     onActionError
   })
 
+  useEffect(() => {
+    const printer = terminalPrinterRef.current
+    if (!printer) return
+    const start = printedChatCountRef.current
+    if (chatHistory.length <= start) return
+    const newEntries = chatHistory.slice(start)
+    newEntries.forEach((entry) => {
+      const line = formatTimelineTerminalLine(entry.role, entry.content)
+      if (!line) return
+      printer(line)
+    })
+    printedChatCountRef.current = chatHistory.length
+    printedStreamingNoticeRef.current = false
+  }, [chatHistory])
+
+  useEffect(() => {
+    const printer = terminalPrinterRef.current
+    if (!printer) return
+    if (!isStreaming) {
+      printedStreamingNoticeRef.current = false
+      return
+    }
+    if (printedStreamingNoticeRef.current) return
+    printer(formatTerminalParagraphBlock('Assistant · streaming', '正在生成回复...'))
+    printedStreamingNoticeRef.current = true
+  }, [isStreaming])
+
   async function handleTranslate(): Promise<boolean> {
     if (!queryInput.trim() || isStreaming) return false
+    onTrackAction?.('query.ai.translate', 'click', 'success')
     try {
       await translate()
       return true
     } catch (error) {
+      onTrackAction?.('query.ai.translate', 'click', 'fail')
       onActionError(error instanceof Error ? error.message : String(error))
       return false
     }
@@ -188,10 +190,15 @@ export function QueryPage(props: {
       return
     }
     try {
-      await window.api.terminalStart(selectedCommand)
-      await window.api.terminalInput(selectedCommand, `${commandToRun}\n`)
+      onTrackAction?.('query.command.execute', 'run', 'success')
+      await window.api.terminalStart(selectedCommand, { source: QUERY_TERMINAL_SOURCE, sessionId: queryTerminalSessionId })
+      await window.api.terminalInput(selectedCommand, `${commandToRun}\n`, {
+        source: QUERY_TERMINAL_SOURCE,
+        sessionId: queryTerminalSessionId
+      })
       setTerminalSessionState('running')
     } catch (error) {
+      onTrackAction?.('query.command.execute', 'run', 'fail')
       onActionError(error instanceof Error ? error.message : String(error))
     }
   }
@@ -215,21 +222,43 @@ export function QueryPage(props: {
   }
 
   function toggleTerminalFullscreen(): void {
-    setShowTerminalFullscreen((prev) => !prev)
+    setShowTerminalFullscreen((prev) => {
+      const next = !prev
+      onTrackAction?.('query.terminal.fullscreen', next ? 'open' : 'close', 'success')
+      return next
+    })
+  }
+
+  function toggleConfirmBeforeExecute(): void {
+    setConfirmBeforeExecute((prev) => {
+      const next = !prev
+      onTrackAction?.('query.command.confirm_toggle', next ? 'enable' : 'disable', 'success')
+      return next
+    })
+  }
+
+  function handleAddFavorite(): void {
+    const raw = (streamingText || commandInput).trim()
+    if (!raw) return
+    addFavoriteCommand()
+    onTrackAction?.('query.favorite.add', 'click', 'success')
+  }
+
+  function handleRemoveFavorite(command: string): void {
+    removeFavoriteCommand(command)
+    onTrackAction?.('query.favorite.remove', 'click', 'success')
   }
 
   return (
     <div
-      ref={rootRef}
       data-testid="log-analysis-page"
       style={{
         flex: 1,
         height: '100%',
         minHeight: 0,
-        display: 'grid',
-        gridTemplateColumns: isCompactLayout ? '1fr' : `${leftRatio}fr 8px ${1 - leftRatio}fr`,
-        gap: isCompactLayout ? 8 : 0,
-        cursor: isDraggingSplit ? 'col-resize' : 'default',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
         background: 'var(--panel)',
         border: '1px solid var(--border-subtle)',
         borderRadius: 20,
@@ -237,281 +266,47 @@ export function QueryPage(props: {
         overflow: 'hidden'
       }}
     >
-      <div style={{ minHeight: 0, display: 'flex', flexDirection: 'column', paddingRight: isCompactLayout ? 0 : 6 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 600 }}>AI 日志会话</div>
-            <div style={{ fontSize: 11, color: 'var(--muted)' }}>{selectedCommand ? `当前目标：${selectedCommand}` : '请先选择会话命令'}</div>
-          </div>
-          <div style={{ display: 'flex', gap: 6 }}>
-            <button style={buttonStyle('muted')} onClick={() => setShowFavoritesDialog(true)}>查看收藏命令</button>
-            <button data-testid="log-analysis-clear-chat" style={buttonStyle('muted')} onClick={clearChatHistory}>清空会话</button>
-          </div>
-        </div>
-
+      <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
         <div
-          ref={timelineRef}
-          data-testid="log-analysis-chat-history"
-          onScroll={(e) => {
-            const el = e.currentTarget
-            const distance = el.scrollHeight - (el.scrollTop + el.clientHeight)
-            setAutoFollowTimeline(distance < 40)
-          }}
-          style={{ ...SECTION_STYLE, flex: 1, minHeight: 0, overflow: 'auto', marginTop: 6, display: 'grid', alignContent: 'start', gap: 6, padding: 18 }}
-        >
-          {timelineEntries.length === 0 && !liveAssistantText ? (
-            <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>请输入问题，开始“生成命令 -&gt; 执行 -&gt; 继续追问”。</div>
-          ) : null}
-          {timelineEntries.map((entry) => (
-            <div
-              key={entry.key}
-              style={{
-                justifySelf: entry.role === 'user' ? 'end' : 'start',
-                width: entry.role === 'user' ? 'fit-content' : 'auto',
-                maxWidth: '92%',
-                padding: '6px 8px',
-                fontSize: 12,
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-                border: '1px solid var(--border-subtle)',
-                borderRadius: 8,
-                background: entry.role === 'user' ? 'rgba(74, 222, 128, 0.1)' : 'var(--panel)',
-                cursor: entry.role === 'assistant' ? 'pointer' : 'default',
-                textAlign: entry.role === 'user' ? 'right' : 'left'
-              }}
-              data-testid={entry.role === 'assistant' ? 'log-analysis-chat-bubble-ai' : 'log-analysis-chat-bubble-user'}
-              onClick={() => {
-                if (entry.role !== 'assistant') return
-                void handleAiBubbleClick(entry.content)
-              }}
-            >
-              <div style={{ marginBottom: 2, fontSize: 10, color: 'var(--muted)' }}>{entry.role === 'user' ? '我' : 'AI'}</div>
-              {entry.content}
-            </div>
-          ))}
-          {liveAssistantText ? (
-            <div style={{ width: '92%', padding: '6px 8px', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word', border: '1px solid var(--border-subtle)', borderRadius: 8, background: 'var(--panel)' }}>
-              <div style={{ marginBottom: 2, fontSize: 10, color: 'var(--muted)' }}>AI（生成中）</div>
-              {liveAssistantText}
-            </div>
-          ) : null}
-        </div>
-
-        <div style={{ ...SECTION_STYLE, marginTop: 6, padding: 8 }}>
-          <div style={{ position: 'relative' }}>
-            <textarea
-              data-testid="log-analysis-input"
-              style={{
-                ...inputStyle,
-                marginTop: 0,
-                minHeight: 108,
-                resize: 'vertical',
-                lineHeight: 1.45,
-                background: 'var(--panel)',
-                boxShadow:
-                  'inset 0 0 0 1px var(--border-subtle), 0 2px 10px color-mix(in srgb, var(--border-subtle) 70%, transparent)',
-                borderColor: 'var(--border-default)',
-                paddingRight: 46,
-                paddingBottom: 34
-              }}
-              value={queryInput}
-              onChange={(e) => setQueryInput(e.target.value)}
-              onCompositionStart={() => {
-                composingRef.current = true
-              }}
-              onCompositionEnd={() => {
-                composingRef.current = false
-              }}
-              placeholder="有问题，尽管问"
-              onKeyDown={async (e) => {
-                if (e.key === 'Enter' && !e.shiftKey && !isStreaming) {
-                  const native = e.nativeEvent as KeyboardEvent
-                  const isImeComposing =
-                    composingRef.current ||
-                    native.isComposing ||
-                    (native as unknown as { keyCode?: number }).keyCode === 229
-                  if (isImeComposing) return
-                  e.preventDefault()
-                  const sent = await handleTranslate()
-                  if (sent) setQueryInput('')
+          style={{
+            ...SECTION_STYLE,
+            ...(showTerminalFullscreen ? { background: 'var(--panel)' } : null),
+            position: showTerminalFullscreen ? 'fixed' : 'absolute',
+            ...(showTerminalFullscreen
+              ? {
+                  inset: '5vh 4vw',
+                  zIndex: 90,
+                  borderRadius: 20,
+                  boxShadow: 'var(--shadow-hover)'
                 }
-              }}
-            />
-            <button
-              type="button"
-              aria-label="发送"
-              data-testid="log-analysis-translate"
-              onClick={handleTranslate}
-              disabled={isStreaming || !queryInput.trim()}
-              style={{
-                position: 'absolute',
-                right: 8,
-                bottom: 8,
-                width: 28,
-                height: 28,
-                borderRadius: 8,
-                border: '1px solid var(--border-subtle)',
-                background: isStreaming || !queryInput.trim() ? 'var(--panel-soft)' : 'var(--panel)',
-                color: isStreaming || !queryInput.trim() ? 'var(--muted)' : 'var(--text)',
-                cursor: isStreaming || !queryInput.trim() ? 'not-allowed' : 'pointer',
-                fontSize: 14,
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center'
-              }}
-            >
-              →
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {isCompactLayout ? null : (
-        <div role="separator" aria-orientation="vertical" onMouseDown={() => setIsDraggingSplit(true)} style={{ width: 8, cursor: 'col-resize', display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 0 }}>
-          <div style={{ width: 2, height: '42%', background: 'var(--border-subtle)' }} />
-        </div>
-      )}
-
-      <div style={{ minHeight: 0, display: 'flex', flexDirection: 'column', paddingLeft: isCompactLayout ? 0 : 6, gap: 6 }}>
-        <div style={{ ...SECTION_STYLE, padding: 8 }}>
+              : { top: 0, left: 0, right: 0, bottom: 0 }),
+            minHeight: 220,
+            overflow: 'hidden',
+            padding: 8,
+            display: 'flex',
+            flexDirection: 'column'
+          }}
+        >
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-            <div style={{ fontSize: 11, color: 'var(--muted)' }}>命令草稿</div>
-            <label
-              data-testid="log-analysis-confirm-execute-toggle"
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6,
-                fontSize: 11,
-                color: 'var(--muted)',
-                cursor: 'pointer',
-                userSelect: 'none'
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={confirmBeforeExecute}
-                onChange={(e) => {
-                  const next = e.target.checked
-                  setConfirmBeforeExecute(next)
-                  if (!next) setPendingAiCommand('')
-                }}
-                style={{ accentColor: 'var(--accent)' }}
-              />
-              二次确认执行
-            </label>
-          </div>
-          <select
-            data-testid="log-analysis-command-select"
-            value={selectedCommand}
-            onChange={(e) => {
-              const next = e.target.value
-              selectCommand(next)
-              try {
-                window.localStorage.setItem(LAST_QUERY_COMMAND_KEY, next)
-              } catch {
-                // ignore storage errors
-              }
-            }}
-            style={{ ...inputStyle, marginTop: 4 }}
-          >
-            <option value="">请选择命令</option>
-            {commands.map((cmd) => (
-              <option key={cmd.name} value={cmd.name}>{cmd.name}</option>
-            ))}
-          </select>
-          <div style={{ position: 'relative', marginTop: 4 }}>
-            <textarea
-              data-testid="log-analysis-command-input"
-              style={{ ...inputStyle, marginTop: 0, minHeight: 120, resize: 'vertical', fontFamily: 'var(--font-mono)', paddingRight: 78, paddingBottom: 34 }}
-              value={isStreaming ? streamingText : commandInput}
-              onChange={(e) => setCommandInput(e.target.value)}
-              placeholder="AI 生成后可在此微调再执行"
-            />
-            <button
-              type="button"
-              aria-label="执行命令"
-              title="执行命令"
-              data-testid="log-analysis-execute"
-              onClick={() => void handleRunDraftCommand()}
-              disabled={!selectedCommand || !activeCommandText}
-              style={{
-                position: 'absolute',
-                right: 42,
-                bottom: 8,
-                width: 28,
-                height: 28,
-                borderRadius: 8,
-                border: '1px solid var(--border-subtle)',
-                background: !selectedCommand || !activeCommandText ? 'var(--panel-soft)' : 'var(--panel)',
-                color: !selectedCommand || !activeCommandText ? 'var(--muted)' : 'var(--text)',
-                cursor: !selectedCommand || !activeCommandText ? 'not-allowed' : 'pointer',
-                fontSize: 14,
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center'
-              }}
-            >
-              ▶
-            </button>
-            <button
-              type="button"
-              aria-label="收藏当前命令"
-              title="收藏当前命令"
-              data-testid="log-analysis-favorite-add"
-              onClick={addFavoriteCommand}
-              disabled={!activeCommandText}
-              style={{
-                position: 'absolute',
-                right: 8,
-                bottom: 8,
-                width: 28,
-                height: 28,
-                borderRadius: 6,
-                border: '1px solid var(--border-subtle)',
-                background: !activeCommandText ? 'var(--panel-soft)' : 'var(--panel)',
-                color: !activeCommandText ? 'var(--muted)' : 'var(--text)',
-                cursor: !activeCommandText ? 'not-allowed' : 'pointer',
-                fontSize: 14,
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center'
-              }}
-            >
-              ★
-            </button>
-          </div>
-        </div>
-
-        {/* 外层 flex:1 在列布局里高度已确定；子级用 absolute 填满槽位，全屏改 fixed，无需占位 div，避免退出全屏时占位与面板同时变化导致闪动 */}
-        <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-          <div
-            ref={terminalPanelRef}
-            style={{
-              ...SECTION_STYLE,
-              ...(showTerminalFullscreen ? { background: 'var(--panel)' } : null),
-              position: showTerminalFullscreen ? 'fixed' : 'absolute',
-              ...(showTerminalFullscreen
-                ? {
-                    inset: '5vh 4vw',
-                    zIndex: 90,
-                    borderRadius: 20,
-                    boxShadow: 'var(--shadow-hover)'
-                  }
-                : { top: 0, left: 0, right: 0, bottom: 0 }),
-              minHeight: 220,
-              overflow: 'hidden',
-              padding: 8,
-              display: 'flex',
-              flexDirection: 'column'
-            }}
-          >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <div style={{ fontSize: 11, color: 'var(--muted)' }}>终端面板</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <div style={{ fontSize: 11, color: 'var(--muted)' }}>执行终端（{terminalSessionState === 'running' ? '运行中' : '空闲'}）</div>
+              <div style={{ fontSize: 12, color: 'var(--muted)' }}>{selectedCommand ? `当前目标：${selectedCommand}` : '未选择命令会话'}</div>
               <SessionBadge state={terminalBadgeState} />
             </div>
-            <button
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <div style={{ fontSize: 11, color: 'var(--muted)' }}>执行终端（{terminalSessionState === 'running' ? '运行中' : '空闲'}）</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--muted)', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  data-testid="log-analysis-confirm-before-execute"
+                  checked={confirmBeforeExecute}
+                  onChange={toggleConfirmBeforeExecute}
+                />
+                执行前确认
+              </label>
+              <button
               type="button"
               aria-label="放大终端"
               title={showTerminalFullscreen ? '退出全屏' : '放大终端（可手动敲命令）'}
@@ -520,13 +315,309 @@ export function QueryPage(props: {
             >
               {showTerminalFullscreen ? '×' : '⛶'}
             </button>
+            </div>
           </div>
           <div style={{ flex: 1, minHeight: 0, border: '1px solid var(--border-subtle)', borderRadius: 6, overflow: 'hidden', background: '#0d1117' }}>
             <div ref={inlineHostRef} style={{ height: '100%', width: '100%' }} />
           </div>
-          </div>
         </div>
       </div>
+
+      {(favoriteCommands.length > 0 || activeCommandText.trim()) && (
+        <div style={{ ...SECTION_STYLE, padding: '8px 10px', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+          <span style={{ fontSize: 11, color: 'var(--muted)', flexShrink: 0 }}>常用命令</span>
+          {favoriteCommands.map((item) => (
+            <button
+              key={item}
+              type="button"
+              data-testid={`log-analysis-favorite-${item.slice(0, 24)}`}
+              style={{ ...buttonStyle('muted'), padding: '2px 8px', fontSize: 11, fontFamily: 'var(--font-mono)' }}
+              onClick={() => fillCommandFromFavorite(item)}
+            >
+              {item.length > 40 ? `${item.slice(0, 40)}…` : item}
+            </button>
+          ))}
+          {activeCommandText.trim() ? (
+            <button
+              type="button"
+              data-testid="log-analysis-favorite-add"
+              style={{ ...buttonStyle('outline'), padding: '2px 8px', fontSize: 11 }}
+              onClick={handleAddFavorite}
+            >
+              收藏当前命令
+            </button>
+          ) : null}
+          {favoriteCommands.length > 0 ? (
+            <button
+              type="button"
+              data-testid="log-analysis-favorite-clear-last"
+              style={{ ...buttonStyle('muted'), padding: '2px 8px', fontSize: 11, marginLeft: 'auto' }}
+              onClick={() => handleRemoveFavorite(favoriteCommands[0]!)}
+            >
+              移除最近收藏
+            </button>
+          ) : null}
+        </div>
+      )}
+
+      <div style={{ ...SECTION_STYLE, padding: 8 }}>
+        <div ref={commandPopoverRef} style={{ position: 'relative' }}>
+          <button
+            type="button"
+            aria-label="选择命令"
+            data-testid="log-analysis-open-command-popover"
+            onClick={() => setShowCommandPopover((prev) => !prev)}
+            style={{
+              position: 'absolute',
+              top: 8,
+              left: 8,
+              width: 24,
+              height: 24,
+              borderRadius: 8,
+              border: '1px solid var(--border-subtle)',
+              background: 'var(--panel-soft)',
+              color: 'var(--text)',
+              cursor: 'pointer',
+              fontSize: 14,
+              lineHeight: 1,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 0
+            }}
+            title={selectedCommand ? `当前命令：${selectedCommand}` : '选择命令'}
+          >
+            ⌘
+          </button>
+          {showCommandPopover ? (
+            <div
+              data-testid="log-analysis-command-popover"
+              className="ui-popover"
+              style={{
+                position: 'absolute',
+                bottom: 'calc(100% - 8px)',
+                left: 8,
+                width: 300,
+                maxHeight: 280,
+                overflowY: 'auto',
+                borderRadius: 12,
+                border: '1px solid var(--border-default)',
+                background: 'var(--panel)',
+                boxShadow: 'var(--shadow-hover)',
+                padding: 8,
+                zIndex: 20
+              }}
+            >
+              <button
+                type="button"
+                data-testid="log-analysis-command-option-empty"
+                style={{
+                  width: '100%',
+                  textAlign: 'left',
+                  marginBottom: 6,
+                  borderRadius: 8,
+                  border: `1px solid ${selectedCommand ? 'var(--border-subtle)' : 'var(--accent)'}`,
+                  background: selectedCommand ? 'var(--panel-soft)' : 'color-mix(in srgb, var(--accent) 12%, var(--panel))',
+                  color: selectedCommand ? 'var(--muted)' : 'var(--text)',
+                  padding: '7px 9px',
+                  cursor: 'pointer'
+                }}
+                onClick={() => {
+                  selectCommand('')
+                  setShowCommandPopover(false)
+                }}
+              >
+                不选择命令
+              </button>
+              {commands.map((cmd) => (
+                <button
+                  key={cmd.name}
+                  type="button"
+                  data-testid={`log-analysis-command-option-${cmd.name}`}
+                  style={{
+                    width: '100%',
+                    textAlign: 'left',
+                    marginBottom: 6,
+                    borderRadius: 8,
+                    border: `1px solid ${selectedCommand === cmd.name ? 'var(--accent)' : 'var(--border-subtle)'}`,
+                    background: selectedCommand === cmd.name ? 'color-mix(in srgb, var(--accent) 12%, var(--panel))' : 'var(--panel-soft)',
+                    color: 'var(--text)',
+                    padding: '7px 9px',
+                    cursor: 'pointer',
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 11
+                  }}
+                  onClick={() => {
+                    selectCommand(cmd.name)
+                    setShowCommandPopover(false)
+                  }}
+                >
+                  {cmd.name}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          <textarea
+            data-testid="log-analysis-input"
+            style={{
+              ...inputStyle,
+              marginTop: 0,
+              minHeight: 108,
+              resize: 'vertical',
+              lineHeight: 1.45,
+              background: 'var(--panel)',
+              boxShadow:
+                'inset 0 0 0 1px var(--border-subtle), 0 2px 10px color-mix(in srgb, var(--border-subtle) 70%, transparent)',
+              borderColor: 'var(--border-default)',
+              paddingTop: 38,
+              paddingRight: 80,
+              paddingBottom: 34
+            }}
+            value={queryInput}
+            onChange={(e) => setQueryInput(e.target.value)}
+            onCompositionStart={() => {
+              composingRef.current = true
+            }}
+            onCompositionEnd={() => {
+              composingRef.current = false
+            }}
+            placeholder="有问题，尽管问"
+            onKeyDown={async (e) => {
+              if (e.key === 'Enter' && !e.shiftKey && !isStreaming) {
+                const native = e.nativeEvent as KeyboardEvent
+                const isImeComposing =
+                  composingRef.current ||
+                  native.isComposing ||
+                  (native as unknown as { keyCode?: number }).keyCode === 229
+                if (isImeComposing) return
+                e.preventDefault()
+                const sent = await handleTranslate()
+                if (sent) setQueryInput('')
+              }
+            }}
+          />
+          <button
+            type="button"
+            aria-label="查看历史记录"
+            title="查看历史记录"
+            data-testid="log-analysis-open-history"
+            onClick={() => setShowHistoryDialog(true)}
+            style={{
+              position: 'absolute',
+              right: 42,
+              bottom: 8,
+              width: 28,
+              height: 28,
+              borderRadius: 8,
+              border: '1px solid var(--border-subtle)',
+              background: 'var(--panel)',
+              color: 'var(--text)',
+              cursor: 'pointer',
+              fontSize: 13,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}
+          >
+            🕘
+          </button>
+          <button
+            type="button"
+            aria-label="发送"
+            data-testid="log-analysis-translate"
+            onClick={handleTranslate}
+            disabled={isStreaming || !queryInput.trim()}
+            style={{
+              position: 'absolute',
+              right: 8,
+              bottom: 8,
+              width: 28,
+              height: 28,
+              borderRadius: 8,
+              border: '1px solid var(--border-subtle)',
+              background: isStreaming || !queryInput.trim() ? 'var(--panel-soft)' : 'var(--panel)',
+              color: isStreaming || !queryInput.trim() ? 'var(--muted)' : 'var(--text)',
+              cursor: isStreaming || !queryInput.trim() ? 'not-allowed' : 'pointer',
+              fontSize: 14,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}
+          >
+            →
+          </button>
+        </div>
+      </div>
+
+      {showHistoryDialog ? (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0, 0, 0, 0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }} onClick={() => setShowHistoryDialog(false)}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: 'min(760px, 92vw)', maxHeight: '72vh', overflow: 'hidden', background: 'var(--panel)', border: '1px solid var(--border-subtle)', borderRadius: 14, padding: 10, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>会话历史</div>
+            <button
+              type="button"
+                data-testid="log-analysis-clear-chat"
+                style={buttonStyle('muted')}
+                onClick={clearChatHistory}
+            >
+                清空会话
+              </button>
+            </div>
+            <div
+              ref={timelineRef}
+              data-testid="log-analysis-chat-history"
+              onScroll={(e) => {
+                const el = e.currentTarget
+                const distance = el.scrollHeight - (el.scrollTop + el.clientHeight)
+                setAutoFollowTimeline(distance < 40)
+              }}
+              style={{ ...SECTION_STYLE, flex: 1, minHeight: 0, overflow: 'auto', marginTop: 8, display: 'grid', alignContent: 'start', gap: 6, padding: 12 }}
+            >
+              {timelineEntries.length === 0 && !liveAssistantText ? (
+                <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>暂无会话记录。</div>
+              ) : null}
+              {timelineEntries.map((entry) => (
+                <div
+                  key={entry.key}
+                  style={{
+                    justifySelf: entry.role === 'user' ? 'end' : 'start',
+                    width: entry.role === 'user' ? 'fit-content' : 'auto',
+                    maxWidth: '92%',
+                    padding: '6px 8px',
+                    fontSize: 12,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: 8,
+                    background: entry.role === 'user' ? 'rgba(74, 222, 128, 0.1)' : 'var(--panel)',
+                    cursor: entry.role === 'assistant' ? 'pointer' : 'default',
+                    textAlign: entry.role === 'user' ? 'right' : 'left'
+                  }}
+                  data-testid={entry.role === 'assistant' ? 'log-analysis-chat-bubble-ai' : 'log-analysis-chat-bubble-user'}
+                  onClick={() => {
+                    if (entry.role !== 'assistant') return
+                    void handleAiBubbleClick(entry.content)
+                  }}
+                >
+                  <div style={{ marginBottom: 2, fontSize: 10, color: 'var(--muted)' }}>{entry.role === 'user' ? '我' : 'AI'}</div>
+                  {entry.content}
+                </div>
+              ))}
+              {liveAssistantText ? (
+                <div style={{ width: '92%', padding: '6px 8px', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word', border: '1px solid var(--border-subtle)', borderRadius: 8, background: 'var(--panel)' }}>
+                  <div style={{ marginBottom: 2, fontSize: 10, color: 'var(--muted)' }}>AI（生成中）</div>
+                  {liveAssistantText}
+                </div>
+              ) : null}
+            </div>
+            <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end' }}>
+              <button type="button" style={buttonStyle('muted')} onClick={() => setShowHistoryDialog(false)}>
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <div
         data-testid="log-analysis-fullscreen-backdrop"
@@ -546,50 +637,6 @@ export function QueryPage(props: {
         }}
       />
 
-      {showFavoritesDialog ? (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0, 0, 0, 0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }} onClick={() => setShowFavoritesDialog(false)}>
-          <div onClick={(e) => e.stopPropagation()} style={{ width: 'min(760px, 92vw)', maxHeight: '72vh', overflow: 'auto', background: 'var(--panel)', border: '1px solid var(--border-subtle)', borderRadius: 14, padding: 10 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>我的收藏命令</div>
-              <button data-testid="log-analysis-close-favorites-dialog" style={buttonStyle('muted')} onClick={() => setShowFavoritesDialog(false)}>关闭</button>
-            </div>
-            <input style={{ ...inputStyle, marginTop: 8 }} value={favoriteSearch} onChange={(e) => setFavoriteSearch(e.target.value)} placeholder="搜索收藏命令" />
-            <div data-testid="log-analysis-favorites" style={{ marginTop: 8, display: 'grid', gap: 4 }}>
-              {filteredFavorites.length === 0 ? (
-                <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>暂无匹配的收藏命令。</div>
-              ) : (
-                filteredFavorites.map((cmd, idx) => (
-                  <div key={`${idx}-${cmd.slice(0, 40)}`} style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
-                    <button
-                      data-testid="log-analysis-favorite-row"
-                      title={cmd}
-                      style={{ ...buttonStyle('muted'), flex: 1, textAlign: 'left', fontFamily: 'var(--font-mono)', fontSize: 11, whiteSpace: 'normal', wordBreak: 'break-all' }}
-                      onClick={() => {
-                        fillCommandFromFavorite(cmd)
-                        setShowFavoritesDialog(false)
-                      }}
-                    >
-                      {formatFavoritePreview(cmd)}
-                    </button>
-                    <button
-                      data-testid={`log-analysis-favorite-remove-${idx}`}
-                      title="取消收藏"
-                      style={{ ...buttonStyle('warn'), flexShrink: 0, padding: '2px 6px', fontSize: 12 }}
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        removeFavoriteCommand(cmd)
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
-      ) : null}
-
       {pendingAiCommand ? (
         <div
           style={{
@@ -599,7 +646,7 @@ export function QueryPage(props: {
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            zIndex: 95
+            zIndex: 105
           }}
           onClick={() => setPendingAiCommand('')}
           data-testid="log-analysis-ai-execute-dialog-mask"
@@ -662,11 +709,14 @@ export function QueryPage(props: {
 function useTerminalSession(args: {
   hostRef: React.RefObject<HTMLDivElement | null>
   commandName: string
+  sessionId: string
   enabled: boolean
+  onTerminalReady?: (printer: ((content: string) => void) | null) => void
   onStatusChange: (state: 'running' | 'idle') => void
   onActionError: (message: string) => void
 }) {
-  const { hostRef, commandName, enabled, onStatusChange, onActionError } = args
+  const { hostRef, commandName, sessionId, enabled, onTerminalReady, onStatusChange, onActionError } = args
+  const terminalReadyRef = useRef(onTerminalReady)
   const statusChangeRef = useRef(onStatusChange)
   const actionErrorRef = useRef(onActionError)
   const terminalRef = useRef<Terminal | null>(null)
@@ -675,8 +725,13 @@ function useTerminalSession(args: {
   const resizeRafRef = useRef<number | null>(null)
   const lastSizeRef = useRef<{ cols: number; rows: number }>({ cols: -1, rows: -1 })
   const activeCommandRef = useRef('')
+  const activeSessionIdRef = useRef('')
   const offDataRef = useRef<(() => void) | null>(null)
   const offStatusRef = useRef<(() => void) | null>(null)
+
+  useEffect(() => {
+    terminalReadyRef.current = onTerminalReady
+  }, [onTerminalReady])
 
   useEffect(() => {
     statusChangeRef.current = onStatusChange
@@ -709,6 +764,9 @@ function useTerminalSession(args: {
     terminal.open(host)
     terminalRef.current = terminal
     fitAddonRef.current = fitAddon
+    terminalReadyRef.current?.((content) => {
+      terminalRef.current?.write(content)
+    })
 
     const onResize = () => {
       const t = terminalRef.current
@@ -724,7 +782,10 @@ function useTerminalSession(args: {
       lastSizeRef.current = { cols: nextCols, rows: nextRows }
       t.resize(nextCols, nextRows)
       if (activeCommand) {
-        void window.api.terminalResize(activeCommand, nextCols, nextRows)
+        const activeSessionId = activeSessionIdRef.current.trim()
+        void window.api.terminalResize(activeCommand, nextCols, nextRows, {
+          sessionId: activeSessionId || undefined
+        })
       }
     }
     const scheduleResize = () => {
@@ -743,7 +804,11 @@ function useTerminalSession(args: {
     const inputDisposable = terminal.onData((data) => {
       const activeCommand = activeCommandRef.current
       if (!activeCommand) return
-      void window.api.terminalInput(activeCommand, data)
+      const activeSessionId = activeSessionIdRef.current.trim()
+      void window.api.terminalInput(activeCommand, data, {
+        source: QUERY_TERMINAL_SOURCE,
+        sessionId: activeSessionId || undefined
+      })
     })
 
     return () => {
@@ -753,6 +818,7 @@ function useTerminalSession(args: {
       offDataRef.current = null
       offStatusRef.current = null
       activeCommandRef.current = ''
+      activeSessionIdRef.current = ''
       resizeObserverRef.current?.disconnect()
       resizeObserverRef.current = null
       window.removeEventListener('resize', scheduleResize)
@@ -762,6 +828,7 @@ function useTerminalSession(args: {
       terminalRef.current = null
       fitAddonRef.current = null
       lastSizeRef.current = { cols: -1, rows: -1 }
+      terminalReadyRef.current?.(null)
     }
   }, [enabled, hostRef])
 
@@ -776,6 +843,7 @@ function useTerminalSession(args: {
     offDataRef.current = null
     offStatusRef.current = null
     activeCommandRef.current = commandName || ''
+    activeSessionIdRef.current = sessionId || ''
     terminal.clear()
     terminal.reset()
     lastSizeRef.current = { cols: -1, rows: -1 }
@@ -795,15 +863,17 @@ function useTerminalSession(args: {
       if (nextCols === last.cols && nextRows === last.rows) return
       lastSizeRef.current = { cols: nextCols, rows: nextRows }
       terminal.resize(nextCols, nextRows)
-      void window.api.terminalResize(commandName, nextCols, nextRows)
+      void window.api.terminalResize(commandName, nextCols, nextRows, { sessionId: sessionId || undefined })
     }
 
     const offData = window.api.onTerminalData((payload) => {
       if (payload.commandName !== commandName) return
+      if ((payload.sessionId || '') !== (sessionId || '')) return
       terminal.write(payload.data)
     })
     const offStatus = window.api.onTerminalStatus((payload) => {
       if (payload.commandName !== commandName) return
+      if ((payload.sessionId || '') !== (sessionId || '')) return
       statusChangeRef.current(payload.state)
       if (payload.state === 'idle' && typeof payload.exitCode === 'number') {
         terminal.write(`\r\n\r\n[会话已结束，状态码 ${payload.exitCode}]\r\n`)
@@ -813,7 +883,7 @@ function useTerminalSession(args: {
     offStatusRef.current = offStatus || null
 
     void window.api
-      .terminalStart(commandName)
+      .terminalStart(commandName, { source: QUERY_TERMINAL_SOURCE, sessionId: sessionId || undefined })
       .then((result) => {
         if (activeCommandRef.current !== commandName) return
         if (result.buffer) terminal.write(result.buffer)
@@ -831,24 +901,7 @@ function useTerminalSession(args: {
       offDataRef.current = null
       offStatusRef.current = null
     }
-  }, [commandName, enabled])
-}
-
-function formatFavoritePreview(cmd: string): string {
-  const single = cmd.replace(/\r\n/g, '\n').replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim()
-  if (single.length <= 70) return single
-  return `${single.slice(0, 68)}...`
-}
-
-function loadSplitRatio(): number {
-  try {
-    const raw = window.localStorage.getItem(SPLIT_RATIO_STORAGE_KEY)
-    const value = Number(raw)
-    if (Number.isFinite(value)) return Math.min(MAX_LEFT_RATIO, Math.max(MIN_LEFT_RATIO, value))
-  } catch {
-    // ignore storage errors
-  }
-  return 0.64
+  }, [commandName, enabled, sessionId])
 }
 
 function loadConfirmBeforeExecute(): boolean {
@@ -888,12 +941,24 @@ function SessionBadge(props: { state: 'running' | 'idle_with_cache' | 'idle_empt
   )
 }
 
-function getViewportWidth(): number {
-  const docWidth = typeof document !== 'undefined' ? document.documentElement?.clientWidth || 0 : 0
-  return docWidth > 0 ? docWidth : window.innerWidth
+function formatTimelineTerminalLine(role: 'user' | 'assistant', content: string): string {
+  const text = content.trim()
+  if (!text) return ''
+  const header = role === 'user' ? 'You' : 'Assistant'
+  return formatTerminalParagraphBlock(header, text)
 }
 
-function resolveCompactLayout(width: number, prevCompact: boolean): boolean {
-  if (prevCompact) return width <= COMPACT_EXIT_WIDTH
-  return width <= COMPACT_ENTER_WIDTH
+function createQueryTerminalSessionId(commandName: string): string {
+  const normalized = commandName.trim()
+  if (!normalized) return ''
+  return `${QUERY_TERMINAL_SESSION_PREFIX}:${normalized}`
 }
+
+function formatTerminalParagraphBlock(header: string, rawContent: string): string {
+  const normalized = rawContent.replace(/\r\n/g, '\n').trim()
+  if (!normalized) return ''
+  const bodyLines = normalized.split('\n')
+  const framedLines = bodyLines.map((line) => `  ${line}`)
+  return `\r\n${header}\r\n${framedLines.join('\r\n')}\r\n`
+}
+

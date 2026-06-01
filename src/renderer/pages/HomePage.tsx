@@ -1,7 +1,9 @@
-import type { AppConfig } from '../../shared/types'
+import { useEffect, useState } from 'react'
+import type { AppConfig, LogViewPreset } from '../../shared/types'
 import { type RuntimeStatus } from '../lib/view-models'
 import { buttonStyle, chipStyle, inputStyle } from '../lib/uiStyles'
 import { Panel } from '../components/Panel'
+import { LogDashboardPresetsPanel } from '../components/LogDashboardPresetsPanel'
 import { TerminalIcon } from '../components/icons/TerminalIcon'
 import { ServiceIcon } from '../components/icons/ServiceIcon'
 import { PlayIcon } from '../components/icons/PlayIcon'
@@ -24,15 +26,26 @@ export function HomePage(props: {
   onOpenTerminal: (commandName: string) => void
   /** 同步当前命令（便于用户稍后自行打开日志/终端页时已是正确选中项） */
   onMarkActiveCommand: (commandName: string) => void
-  onOpenContextMenu: (payload: { x: number; y: number; commandName: string }) => void
+  onOpenContextMenu: (payload: { x: number; y: number; commandName: string; preferNative?: boolean }) => void
   onActionError: (message: string) => void
   onTogglePreset: (presetName: string, action: 'start' | 'stop') => Promise<void>
   demoPresetInstalled: boolean
   onImportDemoCommands: () => Promise<void>
   onCleanupDemoCommands: () => Promise<void>
   onImportDirectoryCommands: () => Promise<void>
+  onBatchViewLogs: () => void
+  onOpenCommandFormForCreate: () => void
+  onOpenAiPromptGuide: () => void
   showDemoHint: boolean
   onDismissDemoHint: () => void
+  onReorderCommands: (draggedCommandName: string, targetCommandName: string) => Promise<void>
+  onReorderTags: (draggedTag: string, targetTag: string) => Promise<void>
+  logViewPresets: LogViewPreset[]
+  onOpenPreset: (name: string) => void
+  onRenamePreset: (oldName: string, nextName: string) => void
+  onDeletePreset: (name: string) => void
+  onTrackAction: (featureKey: string, action: string, result?: 'success' | 'fail' | 'unknown') => void
+  onAfterCommandRun?: () => void
 }) {
   const {
     config,
@@ -55,12 +68,30 @@ export function HomePage(props: {
     onImportDemoCommands,
     onCleanupDemoCommands,
     onImportDirectoryCommands,
+    onBatchViewLogs,
+    onOpenCommandFormForCreate,
+    onOpenAiPromptGuide,
     showDemoHint,
-    onDismissDemoHint
+    onDismissDemoHint,
+    onReorderCommands,
+    onReorderTags,
+    logViewPresets,
+    onOpenPreset,
+    onRenamePreset,
+    onDeletePreset,
+    onTrackAction,
+    onAfterCommandRun
   } = props
+  const [draggingTag, setDraggingTag] = useState<string | null>(null)
+  const [draggingCommandName, setDraggingCommandName] = useState<string | null>(null)
+
+  useEffect(() => {
+    const input = document.querySelector<HTMLInputElement>('[data-testid="home-search"]')
+    input?.focus()
+  }, [])
 
   return (
-    <div data-testid="home-page" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+    <div data-testid="home-page" style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative' }}>
       <Panel style={{ padding: '14px 16px' }}>
         <div style={{ display: 'grid', gap: 12 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 16, alignItems: 'center' }}>
@@ -92,12 +123,18 @@ export function HomePage(props: {
                 }}
                 placeholder="搜索命令或标签..."
                 value={keyword}
-                onChange={(e) => onKeywordChange(e.target.value)}
+                onChange={(e) => {
+                  onTrackAction('home.search.input', 'change', 'success')
+                  onKeywordChange(e.target.value)
+                }}
               />
               {keyword && (
                 <button
                   aria-label="清空搜索词"
-                  onClick={() => onKeywordChange('')}
+                  onClick={() => {
+                    onTrackAction('home.search.clear', 'click', 'success')
+                    onKeywordChange('')
+                  }}
                   style={{
                     position: 'absolute',
                     right: 8,
@@ -140,6 +177,7 @@ export function HomePage(props: {
                   }}
                   onClick={async () => {
                     try {
+                      onTrackAction('home.preset.toggle', 'click', 'success')
                       const hasRunning = preset.sequence.some((item) => {
                         const state = statusMap[item.command]?.state
                         return state === 'running' || state === 'restarting'
@@ -176,14 +214,82 @@ export function HomePage(props: {
               <button 
                 data-testid={`tag-${tag}`} 
                 key={tag} 
+                draggable={tag !== '全部'}
                 style={{ ...chipStyle(activeTag === tag), borderRadius: 'var(--radius-xs)', padding: '3px 10px' }} 
                 onClick={() => onTagChange(tag)}
+                onDragStart={(event) => {
+                  if (tag === '全部') return
+                  event.dataTransfer.setData('text/shell-manage-tag', tag)
+                  event.dataTransfer.effectAllowed = 'move'
+                  setDraggingTag(tag)
+                }}
+                onDragOver={(event) => {
+                  if (tag === '全部') return
+                  event.preventDefault()
+                }}
+                onDrop={async (event) => {
+                  if (tag === '全部') return
+                  event.preventDefault()
+                  const dragged = event.dataTransfer.getData('text/shell-manage-tag') || draggingTag
+                  if (!dragged || dragged === tag) return
+                  try {
+                    await onReorderTags(dragged, tag)
+                  } catch (error) {
+                    onActionError(error instanceof Error ? error.message : String(error))
+                  }
+                  setDraggingTag(null)
+                }}
+                onDragEnd={() => setDraggingTag(null)}
               >
                 {tag}
               </button>
             ))}
             </div>
             <div style={{ display: 'flex', gap: 8, flexShrink: 0, justifySelf: 'end', marginTop: 2 }}>
+            <button
+              data-testid="batch-view-logs-trigger"
+              style={{
+                ...chipStyle(false),
+                borderRadius: 'var(--radius-xs)',
+                padding: '3px 10px',
+                whiteSpace: 'nowrap',
+                flexShrink: 0
+              }}
+              onClick={onBatchViewLogs}
+              onMouseDown={() => onTrackAction('home.batch_logs.trigger', 'click', 'success')}
+            >
+              日志看板
+            </button>
+            <button
+              data-testid="command-create-trigger"
+              style={{
+                ...buttonStyle('primary'),
+                borderRadius: 'var(--radius-xs)',
+                padding: '4px 12px',
+                whiteSpace: 'nowrap',
+                flexShrink: 0,
+                fontWeight: 600,
+                boxShadow: '0 1px 0 color-mix(in srgb, var(--accent) 26%, transparent)'
+              }}
+              onClick={onOpenCommandFormForCreate}
+              onMouseDown={() => onTrackAction('home.command.create.trigger', 'click', 'success')}
+            >
+              ＋ 添加命令
+            </button>
+            <button
+              data-testid="ai-prompt-guide-trigger"
+              style={{
+                ...chipStyle(false),
+                borderRadius: 'var(--radius-xs)',
+                padding: '3px 10px',
+                whiteSpace: 'nowrap',
+                flexShrink: 0
+              }}
+              onClick={onOpenAiPromptGuide}
+              onMouseDown={() => onTrackAction('home.ai_prompt_guide.trigger', 'click', 'success')}
+            >
+              AI 添加命令
+            </button>
             <button
               data-testid="demo-config-toggle"
               style={{
@@ -195,6 +301,7 @@ export function HomePage(props: {
               }}
               onClick={async () => {
                 try {
+                  onTrackAction('home.demo.toggle', 'click', 'success')
                   if (demoPresetInstalled) await onCleanupDemoCommands()
                   else await onImportDemoCommands()
                 } catch (error) {
@@ -215,6 +322,7 @@ export function HomePage(props: {
               }}
               onClick={async () => {
                 try {
+                  onTrackAction('home.import_directory.trigger', 'click', 'success')
                   await onImportDirectoryCommands()
                 } catch (error) {
                   onActionError(error instanceof Error ? error.message : String(error))
@@ -260,6 +368,8 @@ export function HomePage(props: {
           const status = statusMap[cmd.name]
           const state = mode === 'terminal' ? (terminalStatusMap[cmd.name] || 'idle') : (status?.state ?? 'idle')
           const isRunning = state === 'running' || state === 'restarting'
+          const isError = state === 'error'
+          const canOpenServiceLog = mode === 'service' && (isRunning || isError)
           const statusColor = colorByState(state)
           const runtimeHint =
             mode === 'terminal'
@@ -272,7 +382,6 @@ export function HomePage(props: {
           const cardBg = state === 'idle' 
             ? 'var(--panel)' 
             : `color-mix(in srgb, ${statusColor} 7%, transparent)`
-
           return (
             <Panel 
               key={cmd.name} 
@@ -285,7 +394,7 @@ export function HomePage(props: {
                 flexDirection: 'column', 
                 gap: 12,
                 minHeight: 136,
-                background: cardBg,
+                backgroundColor: cardBg,
                 transition:
                   'transform var(--motion-normal) var(--ease-out-strong), box-shadow var(--motion-slow) var(--ease-out-strong), border-color var(--motion-normal) var(--ease-standard), background-color var(--motion-normal) var(--ease-standard)',
                 border: `1px solid ${
@@ -299,11 +408,30 @@ export function HomePage(props: {
             >
               <div
                 data-testid={`command-row-${cmd.name}`}
+                draggable
                 style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 10 }}
                 onContextMenu={(event) => {
                   event.preventDefault()
-                  onOpenContextMenu({ x: event.clientX, y: event.clientY, commandName: cmd.name })
+                  onOpenContextMenu({ x: event.clientX, y: event.clientY, commandName: cmd.name, preferNative: true })
                 }}
+                onDragStart={(event) => {
+                  event.dataTransfer.setData('text/shell-manage-command', cmd.name)
+                  event.dataTransfer.effectAllowed = 'move'
+                  setDraggingCommandName(cmd.name)
+                }}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={async (event) => {
+                  event.preventDefault()
+                  const dragged = event.dataTransfer.getData('text/shell-manage-command') || draggingCommandName
+                  if (!dragged || dragged === cmd.name) return
+                  try {
+                    await onReorderCommands(dragged, cmd.name)
+                  } catch (error) {
+                    onActionError(error instanceof Error ? error.message : String(error))
+                  }
+                  setDraggingCommandName(null)
+                }}
+                onDragEnd={() => setDraggingCommandName(null)}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
                   <div style={{ display: 'grid', gap: 4 }}>
@@ -314,7 +442,9 @@ export function HomePage(props: {
                       >
                         {modeIcon}
                       </span>
-                      <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--text)' }}>{cmd.name}</div>
+                      <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {cmd.name}
+                      </div>
                     </div>
                     {runtimeHint && <div style={{ color: 'var(--muted)', fontSize: 11, opacity: 0.8 }}>{runtimeHint}</div>}
                   </div>
@@ -357,28 +487,42 @@ export function HomePage(props: {
                     onClick={async (e) => {
                       e.stopPropagation()
                       try {
+                        onTrackAction('home.command.run', 'click', 'success')
                         if (mode === 'terminal') {
                           if (isRunning) {
                             onOpenTerminal(cmd.name)
                             return
                           }
-                          await window.api.terminalStart(cmd.name)
                           onMarkActiveCommand(cmd.name)
+                          onOpenTerminal(cmd.name)
+                          onAfterCommandRun?.()
                           return
                         }
-                        if (isRunning) {
+                        if (canOpenServiceLog) {
                           onOpenLog(cmd.name)
                           return
                         }
                         await window.api.processStart(cmd.name)
                         onMarkActiveCommand(cmd.name)
+                        onOpenLog(cmd.name)
+                        onAfterCommandRun?.()
                       } catch (error) {
                         onActionError(error instanceof Error ? error.message : String(error))
                       }
                     }}
                   >
-                    {isRunning ? <ListIcon size={12} /> : <PlayIcon size={12} />}
-                    {mode === 'terminal' ? (isRunning ? '继续会话' : '打开窗口') : isRunning ? '查看日志' : '快捷启动'}
+                    {mode === 'terminal'
+                      ? isRunning
+                        ? <ListIcon size={12} />
+                        : <PlayIcon size={12} />
+                      : canOpenServiceLog
+                        ? <ListIcon size={12} />
+                        : <PlayIcon size={12} />}
+                    {mode === 'terminal'
+                      ? (isRunning ? '继续会话' : '打开窗口')
+                      : canOpenServiceLog
+                        ? '查看日志'
+                        : '启动并查看日志'}
                   </button>
                   {isRunning ? (
                     <button
@@ -389,9 +533,9 @@ export function HomePage(props: {
                         padding: '5px 10px', 
                         fontSize: 12, 
                         borderRadius: 'var(--radius-xs)',
-                        border: '1px solid color-mix(in srgb, var(--err) 25%, var(--border-default))',
-                        background: 'color-mix(in srgb, var(--err) 10%, var(--panel))',
-                        color: 'var(--err)',
+                        border: '1px solid color-mix(in srgb, var(--muted) 22%, var(--border-default))',
+                        background: 'color-mix(in srgb, var(--panel-soft) 70%, transparent)',
+                        color: 'var(--text-dim)',
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
@@ -400,6 +544,7 @@ export function HomePage(props: {
                       onClick={async (e) => {
                         e.stopPropagation()
                         try {
+                          onTrackAction('home.command.stop', 'click', 'success')
                           if (mode === 'terminal') await window.api.terminalStopAllForCommand(cmd.name)
                           else await window.api.processStop(cmd.name)
                         } catch (error) {
@@ -416,11 +561,13 @@ export function HomePage(props: {
                     style={{ ...buttonStyle('muted'), padding: '5px 10px', fontSize: 12, borderRadius: 'var(--radius-xs)' }}
                     onClick={(event) => {
                       event.stopPropagation()
+                      onTrackAction('home.command.more', 'click', 'success')
                       const rect = event.currentTarget.getBoundingClientRect()
                       onOpenContextMenu({
                         x: Math.round(rect.right),
                         y: Math.round(rect.bottom + 4),
-                        commandName: cmd.name
+                        commandName: cmd.name,
+                        preferNative: false
                       })
                     }}
                   >
@@ -432,6 +579,13 @@ export function HomePage(props: {
           )
         })}
       </div>
+
+      <LogDashboardPresetsPanel
+        logViewPresets={logViewPresets}
+        onOpenPreset={onOpenPreset}
+        onRenamePreset={onRenamePreset}
+        onDeletePreset={onDeletePreset}
+      />
 
       {/* 悬浮图例 (右下角) */}
       <div

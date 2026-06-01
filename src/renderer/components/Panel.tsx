@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from 'react'
 
-export function Panel({ children, soft = false, style, className }: { children: ReactNode; soft?: boolean; style?: CSSProperties; className?: string }) {
+export function Panel({ children, soft = false, style, className, ...rest }: { children: ReactNode; soft?: boolean; style?: CSSProperties; className?: string; [key: `data-${string}`]: string | undefined }) {
   return (
     <div
       className={className}
@@ -14,6 +14,7 @@ export function Panel({ children, soft = false, style, className }: { children: 
           'border-color var(--motion-normal) var(--ease-standard), box-shadow var(--motion-slow) var(--ease-out-strong), background-color var(--motion-normal) var(--ease-standard)',
         ...style
       }}
+      {...rest}
     >
       {children}
     </div>

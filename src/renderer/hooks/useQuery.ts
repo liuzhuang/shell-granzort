@@ -10,6 +10,7 @@ interface TranslateContext {
 
 interface ExecuteContext {
   selectedCommand?: string
+  terminalSessionId?: string
 }
 
 const STORAGE_KEY = 'query.ai.session.v1'
@@ -154,10 +155,11 @@ export function useQueryState() {
 
   async function execute(context: ExecuteContext) {
     if (!context.selectedCommand) throw new Error('请先选择项目')
+    const sessionId = context.terminalSessionId?.trim() || undefined
     const command = commandInput.trim()
     if (!command) throw new Error('请先生成或填写待执行命令。')
-    const before = await window.api.terminalGetBuffer(context.selectedCommand)
-    await window.api.terminalStart(context.selectedCommand)
+    const before = await window.api.terminalGetBuffer(context.selectedCommand, { sessionId })
+    await window.api.terminalStart(context.selectedCommand, { source: 'query', sessionId })
     const eventId = `exec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const eventAt = Date.now()
     setExecutionEvents((prev) => [
@@ -172,19 +174,20 @@ export function useQueryState() {
         summary: ''
       }
     ])
-    await window.api.terminalInput(context.selectedCommand, `${command}\n`)
+    await window.api.terminalInput(context.selectedCommand, `${command}\n`, { source: 'query', sessionId })
     setIsSummarizing(true)
-    void summarizeExecutionResult(eventId, context.selectedCommand, command, before.text)
+    void summarizeExecutionResult(eventId, context.selectedCommand, command, before.text, sessionId)
   }
 
   async function summarizeExecutionResult(
     eventId: string,
     commandName: string,
     command: string,
-    beforeText: string
+    beforeText: string,
+    sessionId?: string
   ): Promise<void> {
     try {
-      const output = await pollForExecutionOutput(commandName, beforeText)
+      const output = await pollForExecutionOutput(commandName, beforeText, sessionId)
       const lines = sanitizeOutputLines(output).slice(-220)
       if (lines.length === 0) {
         setExecutionSummary('暂无可总结的新增输出。')
@@ -355,7 +358,7 @@ function loadLastLogPath(): string {
 /**
  * 轮询并等待输出趋于稳定，再将新增输出交给 AI 分析。
  */
-async function pollForExecutionOutput(commandName: string, beforeText: string): Promise<string> {
+async function pollForExecutionOutput(commandName: string, beforeText: string, sessionId?: string): Promise<string> {
   const pollMs = 320
   const stableNeeded = 5
   const maxPolls = 120
@@ -369,7 +372,7 @@ async function pollForExecutionOutput(commandName: string, beforeText: string): 
 
   for (let i = 0; i < maxPolls; i += 1) {
     await sleep(pollMs)
-    const current = await window.api.terminalGetBuffer(commandName)
+    const current = await window.api.terminalGetBuffer(commandName, { sessionId })
     latest = current.text
     const delta = latest.startsWith(beforeText) ? latest.slice(beforeText.length) : latest.slice(-12000)
     if (!sawEnoughDelta && delta.length >= 32) {

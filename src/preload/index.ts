@@ -1,5 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
+  AnalyticsEvent,
+  AnalyticsSummary3d,
+  AnalyticsViewerSnapshot,
   AppConfig,
   AppUpdateBroadcastPayload,
   DashboardApproveReviewRequest,
@@ -9,9 +12,11 @@ import type {
   DashboardIntentRequest,
   DashboardIntentProgressPayload,
   DashboardIntentResponse,
+  ListProjectSubdirectoriesResult,
   DetectProjectsResult,
   PresetProgressPayload,
   ProcessKeywordInspectionResult,
+  ProjectDirectoryValidation,
   QueryAiRequest,
   QueryAiStats,
   QueryAiStreamPayload,
@@ -19,34 +24,77 @@ import type {
   ProcessOutputPayload,
   ProcessStatusPayload,
   QueryOutputPayload,
+  SshKeyConfig,
+  SshKeyImportRequest,
+  SshKeyImportResponse,
   TerminalDataPayload,
   TerminalInstanceSummary,
   TerminalObserverPayload,
-  TerminalStatusPayload
+  TerminalStatusPayload,
+  TemplatePreviewRequest,
+  TemplatePreviewResult,
+  ScriptToTemplateRequest,
+  ScriptToTemplateResult,
+  DeployScriptExecuteRequest,
+  DeployScriptExecuteResult,
+  DeployScriptValidateRequest,
+  DeployScriptValidateResult,
 } from '../shared/types'
 
 const api = {
   getAppVersion: () => ipcRenderer.invoke('app:get-version') as Promise<string>,
+  getPlatform: () => process.platform,
+  showCommandContextMenu: (items: Array<{ key: string; label: string; enabled?: boolean; group?: string }>) =>
+    ipcRenderer.invoke('menu:show-command-context', items) as Promise<{ key: string | null }>,
 
   configRead: () => ipcRenderer.invoke('config:read') as Promise<string>,
+  analyticsTrack: (payload: Omit<AnalyticsEvent, 'schemaVersion' | 'eventId' | 'timestamp'> & { timestamp?: number }) =>
+    ipcRenderer.invoke('analytics:track', payload) as Promise<{ ok: boolean }>,
+  analyticsFlush: () => ipcRenderer.invoke('analytics:flush') as Promise<{ ok: boolean }>,
+  analyticsAggregate3d: () =>
+    ipcRenderer.invoke('analytics:aggregate-3d') as Promise<{ ok: boolean; summary: AnalyticsSummary3d; outputPath: string }>,
+  analyticsGetViewerSnapshot: (limit?: number) =>
+    ipcRenderer.invoke('analytics:get-viewer-snapshot', limit) as Promise<{ ok: boolean; snapshot: AnalyticsViewerSnapshot }>,
+  configGetPath: () => ipcRenderer.invoke('config:getPath') as Promise<string>,
   configValidate: (raw: string) => ipcRenderer.invoke('config:validate', raw) as Promise<{ valid: boolean; error?: string }>,
   configSave: (raw: string) => ipcRenderer.invoke('config:save', raw) as Promise<{ ok: boolean }>,
-  onConfigLoaded: (handler: (cfg: AppConfig) => void) => ipcRenderer.on('config:loaded', (_e, payload) => handler(payload)),
-  onConfigError: (handler: (payload: { error: string }) => void) => ipcRenderer.on('config:error', (_e, payload) => handler(payload)),
+  sshKeyImport: (request: SshKeyImportRequest) =>
+    ipcRenderer.invoke('ssh-key:import', request) as Promise<SshKeyImportResponse>,
+  sshKeyDelete: (id: string) => ipcRenderer.invoke('ssh-key:delete', id) as Promise<{ ok: boolean }>,
+  sshKeyList: () => ipcRenderer.invoke('ssh-key:list') as Promise<SshKeyConfig[]>,
+  onConfigLoaded: (handler: (cfg: AppConfig) => void) => {
+    const wrapped = (_e: unknown, payload: AppConfig) => handler(payload)
+    ipcRenderer.on('config:loaded', wrapped)
+    return () => ipcRenderer.removeListener('config:loaded', wrapped)
+  },
+  onConfigError: (handler: (payload: { error: string }) => void) => {
+    const wrapped = (_e: unknown, payload: { error: string }) => handler(payload)
+    ipcRenderer.on('config:error', wrapped)
+    return () => ipcRenderer.removeListener('config:error', wrapped)
+  },
 
   processStart: (name: string) => ipcRenderer.invoke('process:start', name),
   processStop: (name: string) => ipcRenderer.invoke('process:stop', name),
   processRestart: (name: string) => ipcRenderer.invoke('process:restart', name),
-  onProcessStatus: (handler: (payload: ProcessStatusPayload) => void) =>
-    ipcRenderer.on('process:status', (_e, payload) => handler(payload)),
-  onProcessOutput: (handler: (payload: ProcessOutputPayload) => void) =>
-    ipcRenderer.on('process:output', (_e, payload) => handler(payload)),
+  onProcessStatus: (handler: (payload: ProcessStatusPayload) => void) => {
+    const wrapped = (_e: unknown, payload: ProcessStatusPayload) => handler(payload)
+    ipcRenderer.on('process:status', wrapped)
+    return () => ipcRenderer.removeListener('process:status', wrapped)
+  },
+  onProcessOutput: (handler: (payload: ProcessOutputPayload) => void) => {
+    const wrapped = (_e: unknown, payload: ProcessOutputPayload) => handler(payload)
+    ipcRenderer.on('process:output', wrapped)
+    return () => ipcRenderer.removeListener('process:output', wrapped)
+  },
 
   queryExecute: (command: string) => ipcRenderer.invoke('query:execute', command),
   queryCancel: () => ipcRenderer.invoke('query:cancel'),
   queryAiChat: (payload: QueryAiRequest) => ipcRenderer.invoke('query:ai-chat', payload) as Promise<{ answer: string; stats: QueryAiStats }>,
-  onQueryOutput: (handler: (payload: QueryOutputPayload) => void) =>
-    ipcRenderer.on('query:output', (_e, payload) => handler(payload)),
+  onQueryOutput: (handler: (payload: QueryOutputPayload) => void) => {
+    const wrapped = (_e: unknown, payload: QueryOutputPayload) => handler(payload)
+    ipcRenderer.on('query:output', wrapped)
+    return () => ipcRenderer.removeListener('query:output', wrapped)
+  },
   onQueryAiStream: (handler: (payload: QueryAiStreamPayload) => void) => {
     const wrapped = (_e: unknown, payload: QueryAiStreamPayload) => handler(payload)
     ipcRenderer.on('query:ai-stream', wrapped)
@@ -55,11 +103,49 @@ const api = {
 
   presetExecute: (presetName: string) => ipcRenderer.invoke('preset:execute', presetName),
   presetStop: (presetName: string) => ipcRenderer.invoke('preset:stop', presetName),
-  onPresetProgress: (handler: (payload: PresetProgressPayload) => void) =>
-    ipcRenderer.on('preset:progress', (_e, payload) => handler(payload)),
+  onPresetProgress: (handler: (payload: PresetProgressPayload) => void) => {
+    const wrapped = (_e: unknown, payload: PresetProgressPayload) => handler(payload)
+    ipcRenderer.on('preset:progress', wrapped)
+    return () => ipcRenderer.removeListener('preset:progress', wrapped)
+  },
 
   pickDirectoryAndDetectProjects: (request?: { rootPath?: string; maxDepth?: number; maxDirs?: number }) =>
     ipcRenderer.invoke('project:detect-from-directory', request || {}) as Promise<DetectProjectsResult>,
+  pickProjectDirectory: () => ipcRenderer.invoke('project:pick-directory') as Promise<{ canceled: boolean; path?: string }>,
+  pickAndListProjectSubdirectories: () =>
+    ipcRenderer.invoke('project:list-subdirectories') as Promise<ListProjectSubdirectoriesResult>,
+  validateProjectDirectories: () =>
+    ipcRenderer.invoke('project:validate-directories') as Promise<ProjectDirectoryValidation[]>,
+  deployGetDefaultTemplate: () =>
+    ipcRenderer.invoke('deploy:get-default-template') as Promise<{
+      template: string
+      script: { id: string; name: string; content: string; deployTarget?: string; remoteDir?: string }
+    }>,
+  deployPreviewTemplate: (request: TemplatePreviewRequest) =>
+    ipcRenderer.invoke('deploy:preview-template', request) as Promise<TemplatePreviewResult>,
+  deployConvertToTemplate: (request: ScriptToTemplateRequest) =>
+    ipcRenderer.invoke('deploy:convert-to-template', request) as Promise<ScriptToTemplateResult>,
+  deployValidateScript: (request: DeployScriptValidateRequest) =>
+    ipcRenderer.invoke('deploy:validate-script', request) as Promise<DeployScriptValidateResult>,
+  deployExecuteScript: (request: DeployScriptExecuteRequest) =>
+    ipcRenderer.invoke('deploy:execute-script', request) as Promise<DeployScriptExecuteResult>,
+  pickMacosApplication: (request?: { appPath?: string }) =>
+    ipcRenderer.invoke('app:pick-macos-application', request || {}) as Promise<{
+      canceled: boolean
+      appPath?: string
+      appName?: string
+      launchCommand?: string
+      iconDataUrl?: string
+      iconFilePath?: string
+    }>,
+  fetchWebsiteIcon: (request?: { url?: string }) =>
+    ipcRenderer.invoke('app:fetch-website-icon', request || {}) as Promise<{
+      ok: boolean
+      pageUrl: string
+      iconSourceUrl?: string
+      iconDataUrl?: string
+      iconFilePath?: string
+    }>,
 
   terminalStart: (commandName: string, options?: { source?: string; traceId?: string; sessionId?: string }) =>
     ipcRenderer.invoke('terminal:start', commandName, options) as Promise<{ ok: boolean; state?: 'running' | 'idle'; buffer?: string }>,
@@ -148,6 +234,21 @@ const api = {
     return () => {
       ipcRenderer.removeListener('app-update:status', wrapped)
     }
+  },
+  onAppNavigate: (handler: (payload: { target: 'home' | 'query' | 'monitoring' | 'editor' }) => void) => {
+    const wrapped = (_e: unknown, payload: { target: 'home' | 'query' | 'monitoring' | 'editor' }) => handler(payload)
+    ipcRenderer.on('app:navigate', wrapped)
+    return () => ipcRenderer.removeListener('app:navigate', wrapped)
+  },
+  onAppFocusHomeSearch: (handler: () => void) => {
+    const wrapped = () => handler()
+    ipcRenderer.on('app:focus-home-search', wrapped)
+    return () => ipcRenderer.removeListener('app:focus-home-search', wrapped)
+  },
+  onAppCheckUpdate: (handler: () => void) => {
+    const wrapped = () => handler()
+    ipcRenderer.on('app:check-update', wrapped)
+    return () => ipcRenderer.removeListener('app:check-update', wrapped)
   }
 }
 

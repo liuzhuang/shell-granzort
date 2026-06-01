@@ -1,5 +1,5 @@
 :root {
-  --font-ui: "Nunito Sans", -apple-system, system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-ui: -apple-system, "SF Pro Text", "SF Pro Display", system-ui, "Helvetica Neue", Arial, "Nunito Sans", sans-serif;
   --font-mono: "Geist Mono", "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
 
   --bg: #1a1a1a;
@@ -116,21 +116,29 @@ textarea:focus-visible {
   box-shadow: 0 0 0 2px var(--focus-ring);
 }
 
-/* 全局隐藏滚动条，仍可通过滚轮/触控板/键盘滚动 */
+/* 保留系统滚动语义，统一为低干扰样式 */
 html,
 body,
-#root {
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+#root,
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted) 45%, transparent) transparent;
 }
 
-html::-webkit-scrollbar,
-body::-webkit-scrollbar,
-#root::-webkit-scrollbar,
 *::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
+  width: 9px;
+  height: 9px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 38%, transparent);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
 
 @keyframes presetPulse {
@@ -176,26 +184,22 @@ body::-webkit-scrollbar,
 @keyframes popoverIn {
   from {
     opacity: 0;
-    transform: translateY(6px) scale(0.98);
-    filter: blur(1px);
+    transform: translateY(4px) scale(0.992);
   }
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
-    filter: blur(0);
   }
 }
 
 @keyframes dialogIn {
   from {
     opacity: 0;
-    transform: translateY(10px) scale(0.98);
-    filter: blur(1.5px);
+    transform: translateY(6px) scale(0.992);
   }
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
-    filter: blur(0);
   }
 }
 
@@ -241,7 +245,24 @@ body::-webkit-scrollbar,
   animation-delay: calc(min(var(--card-index, 0), 10) * 35ms);
 }
 
+.genie-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1600;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.genie-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
 .system-ticker {
+  --ticker-line-height: 132px;
   width: 100%;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
@@ -255,8 +276,8 @@ body::-webkit-scrollbar,
 .system-ticker-viewport {
   width: 100%;
   overflow: hidden;
-  padding: 4px 8px;
-  height: 22px;
+  padding: 5px 8px;
+  height: var(--ticker-line-height);
 }
 
 .system-ticker-track-vertical {
@@ -268,45 +289,54 @@ body::-webkit-scrollbar,
 }
 
 .system-ticker-track-vertical.is-animating {
-  transform: translateY(-22px);
+  transform: translateY(calc(var(--ticker-line-height) * -1));
 }
 
 .system-ticker-line {
-  height: 22px;
-  line-height: 22px;
-  white-space: nowrap;
+  height: var(--ticker-line-height);
+  padding: 6px 0;
+  line-height: 1.45;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .system-ticker-static {
   padding: 4px 8px;
+  min-height: var(--ticker-line-height);
+  line-height: 1.45;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .system-ticker--compact {
+  --ticker-line-height: 120px;
   font-size: 9px;
   line-height: 1.35;
 }
 
 .system-ticker--compact .system-ticker-viewport {
-  padding: 3px 4px;
-  height: 20px;
+  padding: 4px 4px;
+  height: var(--ticker-line-height);
 }
 
 .system-ticker--compact .system-ticker-track-vertical.is-animating {
-  transform: translateY(-20px);
+  transform: translateY(calc(var(--ticker-line-height) * -1));
 }
 
 .system-ticker--compact .system-ticker-line {
-  height: 20px;
-  line-height: 20px;
+  height: var(--ticker-line-height);
+  padding: 4px 0;
+  line-height: 1.4;
 }
 
 .system-ticker--compact .system-ticker-static {
   padding: 3px 4px;
+  min-height: var(--ticker-line-height);
+  line-height: 1.4;
 }
 
 @media (prefers-reduced-motion: reduce) {

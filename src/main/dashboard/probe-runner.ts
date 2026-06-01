@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { resolveServiceArgs, resolveShellExecutable } from '../shell-runtime'
 
 type RunProbeOptions = {
   sessionGroupKey?: string
@@ -110,7 +111,9 @@ function ensureInteractiveGcLoop(): void {
 
 function ensureInteractiveProcess(session: InteractiveSession): ChildProcessWithoutNullStreams {
   if (session.process && !session.process.killed) return session.process
-  const child = cpSpawn(session.sshBaseCommand, { shell: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  const shellExec = resolveShellExecutable()
+  const shellArgs = resolveServiceArgs(shellExec, session.sshBaseCommand)
+  const child = cpSpawn(shellExec, shellArgs, { stdio: ['pipe', 'pipe', 'pipe'] })
   session.process = child
   child.stdout.on('data', (buf) => {
     session.stdoutBuffer = trimBuffer(`${session.stdoutBuffer}${String(buf)}`, INTERACTIVE_STDOUT_MAX)
@@ -227,7 +230,9 @@ async function runOneShotCommand(command: string, timeoutMs: number, sessionGrou
     /^\s*ssh(\s|$)/i.test(command) ? rewriteWithPersistentSsh(command, sessionGroupKey || `oneshot-${command}`) : command
   const startedAt = Date.now()
   return new Promise((resolve) => {
-    const child = cpSpawn(preparedCommand, { shell: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const shellExec = resolveShellExecutable()
+    const shellArgs = resolveServiceArgs(shellExec, preparedCommand)
+    const child = cpSpawn(shellExec, shellArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
     let settled = false

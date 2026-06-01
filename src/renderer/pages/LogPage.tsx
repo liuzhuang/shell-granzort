@@ -9,18 +9,23 @@ export function LogPage({
   status,
   lines,
   webUrl,
+  onClearLogs,
   onBack,
   onActionError,
-  onActionSuccess
+  onActionSuccess,
+  onTrackAction
 }: {
   selectedCommand: string
   status?: RuntimeStatus
   lines: string[]
   webUrl?: string
+  onClearLogs: (commandName: string) => void
   onBack: () => void
   onActionError: (message: string) => void
   onActionSuccess: (message: string) => void
+  onTrackAction: (featureKey: string, action: string, result?: 'success' | 'fail' | 'unknown') => void
 }) {
+  const LOG_LOCK_BOTTOM_KEY = 'log.lockBottom'
   const [isKillingPort, setIsKillingPort] = useState(false)
   const [isInspectorOpen, setIsInspectorOpen] = useState(false)
   const [inspectorPort, setInspectorPort] = useState('')
@@ -33,26 +38,23 @@ export function LogPage({
   const [portProcesses, setPortProcesses] = useState<ProcessInspectorItem[]>([])
   const [inspectedKeyword, setInspectedKeyword] = useState('')
   const [keywordProcesses, setKeywordProcesses] = useState<ProcessInspectorItem[]>([])
-  const lastAutoConflictPortRef = useRef<number | undefined>(undefined)
+  const [lockToBottom, setLockToBottom] = useState<boolean>(() => window.localStorage.getItem(LOG_LOCK_BOTTOM_KEY) !== '0')
   const logContainerRef = useRef<HTMLDivElement | null>(null)
   const conflictPort = useMemo(() => extractConflictPortFromLogs(lines), [lines])
 
   useEffect(() => {
+    window.localStorage.setItem(LOG_LOCK_BOTTOM_KEY, lockToBottom ? '1' : '0')
+  }, [lockToBottom])
+
+  useEffect(() => {
+    if (!lockToBottom) return
     if (!logContainerRef.current) return
     logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight
-  }, [lines])
+  }, [lines, lockToBottom])
 
   useEffect(() => {
     setInspectorKeyword(selectedCommand)
   }, [selectedCommand])
-
-  useEffect(() => {
-    if (!conflictPort) return
-    if (lastAutoConflictPortRef.current === conflictPort) return
-    lastAutoConflictPortRef.current = conflictPort
-    setInspectorPort(String(conflictPort))
-    setIsInspectorOpen(true)
-  }, [conflictPort])
 
   const renderedLines = useMemo(
     () =>
@@ -135,6 +137,7 @@ export function LogPage({
               <button
                 data-testid="log-back-icon"
                 onClick={onBack}
+                onMouseDown={() => onTrackAction('log.back_home', 'click', 'success')}
                 title="返回上一级"
                 style={{
                   border: '1px solid var(--border-default)',
@@ -172,11 +175,28 @@ export function LogPage({
             <div style={{ fontSize: 11, color: conflictPort ? 'var(--warn)' : 'var(--muted)' }} data-testid="log-conflict-port-hint">
               {conflictPort ? `已识别冲突端口 :${conflictPort}` : `未识别到端口，回退按名称检索：${selectedCommand || '当前命令'}`}
             </div>
-            <div style={{ display: 'flex', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
               <button
                 data-testid="log-open-web"
-                style={buttonStyle(webUrl ? 'primary' : 'muted')}
+                aria-label="打开网站"
+                title={webUrl ? '打开网站' : '未检测到网站地址'}
+                style={{
+                  border: 'none',
+                  background: 'none',
+                  padding: 0,
+                  minWidth: 32,
+                  minHeight: 32,
+                  height: 32,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: webUrl ? 'var(--text-dim)' : 'var(--muted)',
+                  cursor: webUrl ? 'pointer' : 'not-allowed',
+                  opacity: webUrl ? 1 : 0.55
+                }}
                 onClick={async () => {
+                  onTrackAction('log.open_web', 'click', webUrl ? 'success' : 'fail')
                   if (!webUrl) {
                     onActionError('未检测到该命令的 Web 地址。请在配置文件中定义 webUrl 或等待日志输出链接。')
                     return
@@ -188,7 +208,7 @@ export function LogPage({
                   }
                 }}
               >
-                打开网站
+                <BrowserIcon size={24} />
               </button>
               <button
                 data-testid="log-stop"
@@ -196,6 +216,7 @@ export function LogPage({
                 onClick={async () => {
                   if (!selectedCommand) return
                   try {
+                    onTrackAction('log.stop', 'click', 'success')
                     await window.api.processStop(selectedCommand)
                   } catch (error) {
                     onActionError(error instanceof Error ? error.message : String(error))
@@ -210,6 +231,7 @@ export function LogPage({
                 onClick={async () => {
                   if (!selectedCommand) return
                   try {
+                    onTrackAction('log.restart', 'click', 'success')
                     await window.api.processRestart(selectedCommand)
                   } catch (error) {
                     onActionError(error instanceof Error ? error.message : String(error))
@@ -226,6 +248,7 @@ export function LogPage({
                   if (isKillingPort) return
                   setIsKillingPort(true)
                   try {
+                    onTrackAction('log.kill_port', 'click', 'success')
                     if (conflictPort) {
                       const result = await window.api.killPortProcess(conflictPort)
                       onActionSuccess(
@@ -256,6 +279,7 @@ export function LogPage({
                 data-testid="log-inspector"
                 style={buttonStyle(conflictPort ? 'warn' : 'muted')}
                 onClick={() => {
+                  onTrackAction('log.inspector.open', 'click', 'success')
                   if (conflictPort) setInspectorPort(String(conflictPort))
                   if (!inspectorKeyword.trim()) setInspectorKeyword(selectedCommand || '')
                   setIsInspectorOpen(true)
@@ -264,9 +288,40 @@ export function LogPage({
               >
                 端口排查工具
               </button>
-              <button data-testid="log-back-home" style={buttonStyle('muted')} onClick={onBack}>
-                返回首页
+              <button
+                data-testid="log-clear"
+                disabled={!selectedCommand}
+                style={{
+                  ...buttonStyle('outline'),
+                  ...(!selectedCommand ? { opacity: 0.5, cursor: 'not-allowed' as const } : {})
+                }}
+                onClick={() => {
+                  if (!selectedCommand) return
+                  if (!lines.length) {
+                    onActionError('当前没有可清空的日志内容')
+                    return
+                  }
+                  onTrackAction('log.clear', 'click', 'success')
+                  onClearLogs(selectedCommand)
+                }}
+              >
+                清空日志
               </button>
+              </div>
+              <label
+                htmlFor="log-lock-bottom-checkbox"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-dim)', userSelect: 'none' }}
+              >
+                <input
+                  id="log-lock-bottom-checkbox"
+                  data-testid="log-lock-bottom"
+                  type="checkbox"
+                  checked={lockToBottom}
+                  onChange={(event) => setLockToBottom(event.target.checked)}
+                  onClick={() => onTrackAction('log.lock_bottom.toggle', 'click', 'success')}
+                />
+                锁定底部
+              </label>
             </div>
           </div>
         </div>
@@ -488,6 +543,19 @@ export function LogPage({
         </div>
       )}
     </div>
+  )
+}
+
+/** 常见多色分瓣 + 中心蓝点（原创简化几何，非官方精修，表示「用浏览器打开」） */
+function BrowserIcon({ size = 24 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path fill="#EA4335" d="M12 12L12 3A9 9 0 0 1 19.79 16.5z" />
+      <path fill="#FBBC04" d="M12 12L19.79 16.5A9 9 0 0 1 4.21 16.5z" />
+      <path fill="#34A853" d="M12 12L4.21 16.5A9 9 0 0 1 12 3z" />
+      <circle cx="12" cy="12" r="3.4" fill="#4285F4" />
+      <circle cx="12" cy="12" r="1.1" fill="#fff" />
+    </svg>
   )
 }
 

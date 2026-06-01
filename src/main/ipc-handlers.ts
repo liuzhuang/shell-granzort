@@ -1,19 +1,36 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, Menu, dialog, ipcMain, shell } from 'electron'
 import { exec, spawn as cpSpawn } from 'node:child_process'
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { homedir } from 'node:os'
+import { basename, join, extname } from 'node:path'
 import { spawn as ptySpawn, type IPty } from 'node-pty'
 import type {
+  AnalyticsEvent,
   AppConfig,
   CommandConfig,
   DashboardApproveReviewRequest,
   DashboardExecuteProbeRequest,
+  ListProjectSubdirectoriesResult,
   DetectProjectsResult,
   DashboardIntentRequest,
   ProcessInspectorItem,
   PresetAction,
+  ProjectDirectoryValidation,
   QueryAiRequest,
+  TemplatePreviewRequest,
+  TemplatePreviewResult,
+  ScriptToTemplateRequest,
+  ScriptToTemplateResult,
+  DeployScriptExecuteRequest,
+  DeployScriptExecuteResult,
+  DeployScriptValidateRequest,
+  DeployScriptValidateResult,
   QueryAiStreamPayload,
   QueryOutputPayload,
+  SshKeyImportRequest,
   TerminalDataPayload,
+  TerminalStartupStep,
   TerminalObserverPayload,
   TerminalStatusPayload
 } from '../shared/types'
@@ -21,16 +38,47 @@ import { ConfigLoader } from './config-loader'
 import { ProcessManager } from './process-manager'
 import { LlmService } from './llm-service'
 import { terminateProcessTreeWithEscalation } from './process-tree'
-import { resolveShellExecutable, resolveTerminalArgs } from './shell-runtime'
+import { resolveServiceArgs, resolveShellExecutable, resolveTerminalArgs } from './shell-runtime'
 import { buildDashboardIntent } from './dashboard/intent-service'
 import { parseProbeOutput } from './dashboard/parser-core'
 import { runProbeCommand } from './dashboard/probe-runner'
 import { ReviewTokenStore } from './dashboard/review-token-store'
 import { inferRiskLevel, isCommandBlocked } from './dashboard/security-gate'
 import { detectProjectsFromRoot } from './project-detector'
+import { listImmediateSubdirectories, validateProjectDirectories } from './project-registry'
+import { createDefaultDeployScript, DEFAULT_DEPLOY_TEMPLATE, previewDeployTemplate } from './template-engine'
+import { convertScriptToTemplate } from './script-to-template'
+import {
+  clearDeployScriptSession,
+  getDeployScriptSession,
+  isDeployTerminalCommand,
+  prepareDeployScriptExecution,
+  renderDeployScriptContent,
+  resolveDeployScriptInput
+} from './deploy-script-runner'
+import { resolveCommandWithSshKey } from './ssh-command'
+import {
+  deleteSshKeyFile,
+  getSshKeyFilePath,
+  removeSshKeyMetadata,
+  sanitizeKeyId,
+  slugifyKeyLabel,
+  upsertSshKeyMetadata,
+  writeSshKeyFile
+} from './ssh-key-store'
+import yaml from 'js-yaml'
+import { AnalyticsStore } from './analytics-store'
 
 export interface IpcRuntimeControl {
   shutdown: () => Promise<void>
+}
+
+interface NativeMenuItemInput {
+  key: string
+  label: string
+  enabled?: boolean
+  tone?: 'normal' | 'warn' | 'danger'
+  group?: string
 }
 
 export function registerIpcHandlers(
@@ -40,10 +88,18 @@ export function registerIpcHandlers(
   getConfig: () => AppConfig,
   setConfig: (config: AppConfig) => void
 ): IpcRuntimeControl {
+  const analyticsStore = new AnalyticsStore()
+  interface TerminalRuntimeState {
+    restarts: number
+    manualStop: boolean
+    pendingRestartTimer?: ReturnType<typeof setTimeout>
+    lastStartOptions?: { source?: string; traceId?: string; sessionId?: string }
+  }
   const terminalMap = new Map<
     string,
     { pty: IPty; commandName: string; sessionId?: string; commandLine: string; sessionKind: string }
   >()
+  const terminalRuntimeMap = new Map<string, TerminalRuntimeState>()
   const terminalBufferMap = new Map<string, string>()
   const terminalLastExitAtMap = new Map<string, number>()
   const terminalObserverPendingMap = new Map<string, string>()
@@ -54,8 +110,28 @@ export function registerIpcHandlers(
   const MAX_RETAINED_TERMINAL_BUFFERS = 60
   const MAX_TERMINAL_OBSERVER_CHUNK = 8_000
   const TERMINAL_OBSERVER_DEBOUNCE_MS = 900
+  const STARTUP_STEP_DEFAULT_TIMEOUT_MS = 15_000
   const reviewTokenStore = new ReviewTokenStore()
   const probeGroupTails = new Map<string, Promise<void>>()
+
+  const resolveCommandForExecution = (command: CommandConfig): CommandConfig => {
+    const appConfig = getConfig()
+    const resolvedCommand = resolveCommandWithSshKey(
+      command.command,
+      command.sshKeyId,
+      appConfig.settings.sshKeys
+    )
+    if (resolvedCommand === command.command) return command
+    return { ...command, command: resolvedCommand }
+  }
+
+  const persistConfig = (config: AppConfig) => {
+    const raw = yaml.dump(config, { indent: 2, lineWidth: -1, noRefs: true })
+    configLoader.save(raw)
+    setConfig(config)
+    processManager.syncConfig(config.commands)
+    broadcast('config:loaded', config)
+  }
 
   const pruneTerminalBuffers = () => {
     const now = Date.now()
@@ -83,6 +159,27 @@ export function registerIpcHandlers(
       terminalObserverTimerMap.delete(sessionKey)
     }
     terminalObserverPendingMap.delete(sessionKey)
+  }
+
+  const getOrCreateTerminalRuntime = (sessionKey: string): TerminalRuntimeState => {
+    const existing = terminalRuntimeMap.get(sessionKey)
+    if (existing) return existing
+    const created: TerminalRuntimeState = { restarts: 0, manualStop: false }
+    terminalRuntimeMap.set(sessionKey, created)
+    return created
+  }
+
+  const clearTerminalRestartTimer = (sessionKey: string) => {
+    const runtime = terminalRuntimeMap.get(sessionKey)
+    if (!runtime?.pendingRestartTimer) return
+    clearTimeout(runtime.pendingRestartTimer)
+    runtime.pendingRestartTimer = undefined
+  }
+
+  const markTerminalManualStop = (sessionKey: string) => {
+    const runtime = getOrCreateTerminalRuntime(sessionKey)
+    runtime.manualStop = true
+    clearTerminalRestartTimer(sessionKey)
   }
 
   const flushTerminalObserver = (sessionKey: string, commandName: string, sessionId?: string) => {
@@ -119,9 +216,176 @@ export function registerIpcHandlers(
     }
   }
 
+  const appendTerminalAutomationNote = (
+    sessionKey: string,
+    commandName: string,
+    sessionId: string | undefined,
+    message: string
+  ) => {
+    const line = `\r\n[shell-manage] ${message}\r\n`
+    const prev = terminalBufferMap.get(sessionKey) || ''
+    terminalBufferMap.set(sessionKey, `${prev}${line}`.slice(-MAX_TERMINAL_BUFFER))
+    broadcast('terminal:data', asTerminalData(commandName, line, sessionId))
+    queueTerminalObserver(sessionKey, commandName, sessionId, line)
+  }
+
+  const waitForTerminalOutputPattern = async (sessionKey: string, pattern: RegExp, timeoutMs: number): Promise<void> => {
+    const startedAt = Date.now()
+    while (Date.now() - startedAt < timeoutMs) {
+      if (!terminalMap.has(sessionKey)) throw new Error('会话已结束')
+      const text = terminalBufferMap.get(sessionKey) || ''
+      if (pattern.test(text)) return
+      await sleep(120)
+    }
+    throw new Error(`等待输出超时（${timeoutMs}ms）`)
+  }
+
+  const runTerminalStartupSteps = async (
+    sessionKey: string,
+    commandName: string,
+    sessionId: string | undefined,
+    startupSteps: TerminalStartupStep[],
+    traceId: string
+  ): Promise<void> => {
+    if (startupSteps.length === 0) return
+    appendTerminalAutomationNote(sessionKey, commandName, sessionId, `启动步骤已开始，共 ${startupSteps.length} 步`)
+    for (let index = 0; index < startupSteps.length; index += 1) {
+      const step = startupSteps[index]
+      const stepLabel = step.label?.trim() || `步骤 ${index + 1}`
+      if (step.delayMs && step.delayMs > 0) {
+        appendTerminalAutomationNote(sessionKey, commandName, sessionId, `${stepLabel} 等待 ${step.delayMs}ms`)
+        await sleep(step.delayMs)
+      }
+      if (step.waitForOutputPattern) {
+        const timeoutMs = step.timeoutMs || STARTUP_STEP_DEFAULT_TIMEOUT_MS
+        appendTerminalAutomationNote(
+          sessionKey,
+          commandName,
+          sessionId,
+          `${stepLabel} 等待输出匹配 /${step.waitForOutputPattern}/（超时 ${timeoutMs}ms）`
+        )
+        await waitForTerminalOutputPattern(sessionKey, new RegExp(step.waitForOutputPattern, 'm'), timeoutMs)
+      }
+      const session = terminalMap.get(sessionKey)
+      if (!session) throw new Error('会话已结束，无法继续执行启动步骤')
+      const payload = step.sendNewline === false ? step.send : `${step.send}\n`
+      session.pty.write(payload)
+      appendTerminalAutomationNote(sessionKey, commandName, sessionId, `${stepLabel} 已发送`)
+      console.info('[terminal][startup-step] sent', {
+        traceId,
+        sessionKey,
+        commandName,
+        sessionId,
+        stepIndex: index,
+        stepLabel,
+        sendPreview: step.send.slice(0, 180),
+        at: Date.now()
+      })
+    }
+    appendTerminalAutomationNote(sessionKey, commandName, sessionId, '启动步骤执行完成，已进入手动交互模式')
+  }
+
+  const POST_COMMAND_IDLE_MS = 2000
+  const POST_COMMAND_TIMEOUT_MS = 30_000
+
+  const waitForOutputIdle = async (sessionKey: string, idleMs: number, timeoutMs: number): Promise<void> => {
+    const startedAt = Date.now()
+    let lastBufferLen = (terminalBufferMap.get(sessionKey) || '').length
+    let lastChangeAt = Date.now()
+    while (Date.now() - startedAt < timeoutMs) {
+      if (!terminalMap.has(sessionKey)) throw new Error('会话已结束')
+      const currentLen = (terminalBufferMap.get(sessionKey) || '').length
+      if (currentLen !== lastBufferLen) {
+        lastBufferLen = currentLen
+        lastChangeAt = Date.now()
+      }
+      if (Date.now() - lastChangeAt >= idleMs && currentLen > 0) return
+      await sleep(100)
+    }
+    throw new Error(`等待输出稳定超时（${timeoutMs}ms）`)
+  }
+
+  const runPostCommands = async (
+    sessionKey: string,
+    commandName: string,
+    sessionId: string | undefined,
+    postCommands: string[],
+    traceId: string
+  ): Promise<void> => {
+    appendTerminalAutomationNote(sessionKey, commandName, sessionId, `等待会话就绪后注入 ${postCommands.length} 条后续命令`)
+    await waitForOutputIdle(sessionKey, POST_COMMAND_IDLE_MS, POST_COMMAND_TIMEOUT_MS)
+    for (let index = 0; index < postCommands.length; index += 1) {
+      const cmd = postCommands[index]
+      const session = terminalMap.get(sessionKey)
+      if (!session) throw new Error('会话已结束，无法继续注入')
+      session.pty.write(`${cmd}\n`)
+      appendTerminalAutomationNote(sessionKey, commandName, sessionId, `已注入: ${cmd.slice(0, 120)}`)
+      console.info('[terminal][post-command] sent', { traceId, commandName, sessionId, index, cmd: cmd.slice(0, 180), at: Date.now() })
+      if (index < postCommands.length - 1) {
+        await waitForOutputIdle(sessionKey, POST_COMMAND_IDLE_MS, POST_COMMAND_TIMEOUT_MS)
+      }
+    }
+    appendTerminalAutomationNote(sessionKey, commandName, sessionId, '后续命令注入完成，已进入手动交互模式')
+  }
+
   ipcMain.handle('app:get-version', () => app.getVersion())
+  ipcMain.handle('menu:show-command-context', async (event, items: NativeMenuItemInput[]) => {
+    if (!Array.isArray(items) || items.length === 0) return { key: null as string | null }
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return { key: null as string | null }
+    let selectedKey: string | null = null
+    const grouped = items.reduce<Record<string, NativeMenuItemInput[]>>((acc, item) => {
+      const group = item.group || '更多设置'
+      if (!acc[group]) acc[group] = []
+      acc[group].push(item)
+      return acc
+    }, {})
+    const orderedGroups = ['快捷运行', '配置管理', '更多设置'].filter((group) => grouped[group]?.length > 0)
+    const template: Electron.MenuItemConstructorOptions[] = []
+    for (const group of orderedGroups) {
+      const chunk = grouped[group] || []
+      if (template.length > 0) template.push({ type: 'separator' })
+      for (const item of chunk) {
+        template.push({
+          label: item.label,
+          enabled: item.enabled !== false,
+          click: () => {
+            selectedKey = item.key
+          }
+        })
+      }
+    }
+    const menu = Menu.buildFromTemplate(template)
+    await new Promise<void>((resolve) => {
+      menu.popup({
+        window: win,
+        callback: () => resolve()
+      })
+    })
+    return { key: selectedKey }
+  })
 
   ipcMain.handle('config:read', () => configLoader.readRaw())
+  ipcMain.handle(
+    'analytics:track',
+    async (_e, payload: Omit<AnalyticsEvent, 'schemaVersion' | 'eventId' | 'timestamp'> & { timestamp?: number }) => {
+      await analyticsStore.track(payload)
+      return { ok: true as const }
+    }
+  )
+  ipcMain.handle('analytics:flush', async () => {
+    await analyticsStore.flush()
+    return { ok: true as const }
+  })
+  ipcMain.handle('analytics:aggregate-3d', async () => {
+    const { summary, outputPath } = await analyticsStore.aggregate3d()
+    return { ok: true as const, summary, outputPath }
+  })
+  ipcMain.handle('analytics:get-viewer-snapshot', async (_e, limit?: number) => {
+    const snapshot = await analyticsStore.getViewerSnapshot(typeof limit === 'number' ? limit : 200)
+    return { ok: true as const, snapshot }
+  })
+  ipcMain.handle('config:getPath', () => configLoader.getConfigPath())
   ipcMain.handle('config:validate', (_e, raw: string) => configLoader.validate(raw))
   ipcMain.handle('config:save', (_e, raw: string) => {
     configLoader.save(raw)
@@ -132,13 +396,56 @@ export function registerIpcHandlers(
     return { ok: true }
   })
 
+  ipcMain.handle('ssh-key:import', (_e, request: SshKeyImportRequest) => {
+    const label = request.label?.trim()
+    if (!label) throw new Error('密钥名称不能为空')
+    const id = sanitizeKeyId(request.id?.trim() || slugifyKeyLabel(label))
+    writeSshKeyFile(id, request.content)
+    const config = getConfig()
+    const nextConfig: AppConfig = {
+      ...config,
+      settings: {
+        ...config.settings,
+        sshKeys: upsertSshKeyMetadata(config.settings.sshKeys, {
+          id,
+          label,
+          createdAt: new Date().toISOString()
+        })
+      }
+    }
+    persistConfig(nextConfig)
+    return { ok: true as const, id, label }
+  })
+
+  ipcMain.handle('ssh-key:delete', (_e, id: string) => {
+    const keyId = sanitizeKeyId(id)
+    deleteSshKeyFile(keyId)
+    const config = getConfig()
+    const nextConfig: AppConfig = {
+      ...config,
+      commands: config.commands.map((command) =>
+        command.sshKeyId === keyId ? { ...command, sshKeyId: undefined } : command
+      ),
+      settings: {
+        ...config.settings,
+        sshKeys: removeSshKeyMetadata(config.settings.sshKeys, keyId)
+      }
+    }
+    persistConfig(nextConfig)
+    return { ok: true as const }
+  })
+
+  ipcMain.handle('ssh-key:list', () => {
+    return getConfig().settings.sshKeys || []
+  })
+
   ipcMain.handle('process:start', (_e, commandName: string) => {
     const command = getConfig().commands.find((item) => item.name === commandName)
     if (!command) throw new Error(`命令不存在: ${commandName}`)
     if ((command.mode || 'service') === 'terminal') {
       throw new Error(`命令 ${commandName} 为交互终端模式，请使用“进入终端”`)
     }
-    processManager.start(command)
+    processManager.start(resolveCommandForExecution(command))
     return { ok: true }
   })
   ipcMain.handle('process:stop', (_e, commandName: string) => {
@@ -151,7 +458,7 @@ export function registerIpcHandlers(
     if ((command.mode || 'service') === 'terminal') {
       throw new Error(`命令 ${commandName} 为交互终端模式，不支持后台重启`)
     }
-    processManager.restart(command)
+    processManager.restart(resolveCommandForExecution(command))
     return { ok: true }
   })
 
@@ -193,29 +500,201 @@ export function registerIpcHandlers(
     }
   )
 
-  ipcMain.handle(
-    'terminal:start',
-    (_e, commandName: string, options?: { source?: string; traceId?: string; sessionId?: string }) => {
+  ipcMain.handle('project:pick-directory', async (): Promise<{ canceled: boolean; path?: string }> => {
+    const selected = await dialog.showOpenDialog({
+      title: '选择项目目录',
+      properties: ['openDirectory']
+    })
+    if (selected.canceled || selected.filePaths.length === 0) {
+      return { canceled: true }
+    }
+    return { canceled: false, path: selected.filePaths[0] }
+  })
+
+  ipcMain.handle('project:list-subdirectories', async (): Promise<ListProjectSubdirectoriesResult> => {
+    const selected = await dialog.showOpenDialog({
+      title: '选择要导入子目录的父目录',
+      properties: ['openDirectory']
+    })
+    if (selected.canceled || selected.filePaths.length === 0) {
+      return { canceled: true, subdirectories: [] }
+    }
+    const rootPath = selected.filePaths[0]
+    const subdirectories = await listImmediateSubdirectories(rootPath)
+    return { canceled: false, rootPath, subdirectories }
+  })
+
+  ipcMain.handle('project:validate-directories', (): ProjectDirectoryValidation[] => {
+    const config = getConfig()
+    return validateProjectDirectories(config.projectDirectories || [])
+  })
+
+  ipcMain.handle('deploy:get-default-template', (): { template: string; script: ReturnType<typeof createDefaultDeployScript> } => {
+    return {
+      template: DEFAULT_DEPLOY_TEMPLATE,
+      script: createDefaultDeployScript()
+    }
+  })
+
+  ipcMain.handle('deploy:preview-template', (_e, request: TemplatePreviewRequest): TemplatePreviewResult => {
+    const config = getConfig()
+    return previewDeployTemplate({
+      template: request.content,
+      projectDirectories: request.projectDirectories ?? config.projectDirectories ?? [],
+      sshKeys: config.settings.sshKeys || []
+    })
+  })
+
+  ipcMain.handle('deploy:convert-to-template', (_e, request: ScriptToTemplateRequest): ScriptToTemplateResult => {
+    const config = getConfig()
+    const sshKeys = config.settings.sshKeys || []
+    return convertScriptToTemplate({
+      script: request.script,
+      projectDirectories: request.projectDirectories ?? config.projectDirectories ?? [],
+      sshKeys: sshKeys.map((item) => ({
+        id: item.id,
+        label: item.label,
+        path: getSshKeyFilePath(item.id)
+      }))
+    })
+  })
+
+  ipcMain.handle('deploy:validate-script', (_e, request: DeployScriptValidateRequest): DeployScriptValidateResult => {
+    const config = getConfig()
+    const script = resolveDeployScriptInput(config, request)
+    const rendered = renderDeployScriptContent(config, script)
+    return {
+      ok: rendered.missingSlots.length === 0 && rendered.unknownSlots.length === 0,
+      missingSlots: rendered.missingSlots,
+      unknownSlots: rendered.unknownSlots,
+      usedSlots: rendered.usedSlots
+    }
+  })
+
+  ipcMain.handle('deploy:execute-script', async (_e, request: DeployScriptExecuteRequest): Promise<DeployScriptExecuteResult> => {
+    const config = getConfig()
+    const script = resolveDeployScriptInput(config, request)
+    const prepared = await prepareDeployScriptExecution(app.getPath('userData'), config, script)
+    return {
+      ok: true,
+      terminalCommandName: prepared.terminalCommandName,
+      scriptId: prepared.scriptId,
+      scriptName: prepared.scriptName
+    }
+  })
+
+  ipcMain.handle('app:pick-macos-application', async (_e, request?: { appPath?: string }) => {
+    if (process.platform !== 'darwin') {
+      throw new Error('当前平台不支持选择 macOS App')
+    }
+    let appPath = request?.appPath?.trim() || ''
+    if (!appPath) {
+      const fallbackPath = join(homedir(), 'Applications')
+      const selected = await dialog.showOpenDialog({
+        title: '选择应用（.app）',
+        defaultPath: '/Applications',
+        properties: ['openFile'],
+        filters: [{ name: 'Application', extensions: ['app'] }]
+      })
+      if (selected.canceled || selected.filePaths.length === 0) {
+        const selectedFallback = await dialog.showOpenDialog({
+          title: '选择应用（.app）',
+          defaultPath: fallbackPath,
+          properties: ['openFile'],
+          filters: [{ name: 'Application', extensions: ['app'] }]
+        })
+        if (selectedFallback.canceled || selectedFallback.filePaths.length === 0) {
+          return { canceled: true as const }
+        }
+        appPath = selectedFallback.filePaths[0] || ''
+      } else {
+        appPath = selected.filePaths[0] || ''
+      }
+    }
+
+    if (!appPath) return { canceled: true as const }
+    if (!/\.app$/i.test(appPath)) {
+      throw new Error('请选择 .app 应用')
+    }
+
+    const appName = basename(appPath).replace(/\.app$/i, '').trim()
+    if (!appName) {
+      throw new Error('无法识别应用名称')
+    }
+    const launchCommand = `open -a "${escapeDoubleQuoted(appName)}"`
+    const iconResult = await resolveMacosAppIconData(appPath, appName)
+    return {
+      canceled: false as const,
+      appPath,
+      appName,
+      launchCommand,
+      iconDataUrl: iconResult.iconDataUrl,
+      iconFilePath: iconResult.iconFilePath
+    }
+  })
+
+  ipcMain.handle('app:fetch-website-icon', async (_e, request?: { url?: string }) => {
+    const rawUrl = request?.url?.trim() || ''
+    if (!rawUrl) throw new Error('网站地址不能为空')
+    const pageUrl = normalizeWebsiteUrl(rawUrl)
+    const result = await resolveWebsiteIconData(pageUrl)
+    if (!result.iconDataUrl || !result.iconFilePath) {
+      throw new Error('未读取到网站图标，请确认地址可访问')
+    }
+    return {
+      ok: true as const,
+      pageUrl,
+      iconSourceUrl: result.iconSourceUrl,
+      iconDataUrl: result.iconDataUrl,
+      iconFilePath: result.iconFilePath
+    }
+  })
+
+  const startTerminalSession = (
+    commandName: string,
+    options?: { source?: string; traceId?: string; sessionId?: string },
+    behavior?: { preserveRestarts?: boolean }
+  ) => {
     pruneTerminalBuffers()
-    const command = getConfig().commands.find((item) => item.name === commandName)
-    if (!command) throw new Error(`命令不存在: ${commandName}`)
+    const deploySession = isDeployTerminalCommand(commandName) ? getDeployScriptSession(commandName) : undefined
+    const command =
+      deploySession
+        ? ({
+            name: commandName,
+            command: deploySession.commandLine,
+            tags: [],
+            mode: 'terminal' as const,
+            autoRestart: false
+          } satisfies CommandConfig)
+        : getConfig().commands.find((item) => item.name === commandName)
+    if (!command) throw new Error(deploySession ? `部署脚本会话已过期: ${commandName}` : `命令不存在: ${commandName}`)
+    const resolved = resolveCommandForExecution(command)
     const source = options?.source || 'unknown'
     const traceId = options?.traceId || 'trace-missing'
     const sessionId = options?.sessionId?.trim() || undefined
     const sessionKey = resolveTerminalSessionKey(commandName, sessionId)
+    const runtime = getOrCreateTerminalRuntime(sessionKey)
+    runtime.lastStartOptions = { source: options?.source, traceId: options?.traceId, sessionId: options?.sessionId }
+    runtime.manualStop = false
+    clearTerminalRestartTimer(sessionKey)
+    if (!behavior?.preserveRestarts) runtime.restarts = 0
     const isMonitoringSource = source === 'monitoring'
-    const isSshCommand = /^\s*ssh(\s|$)/i.test(command.command)
+    const commandSegments = resolved.command.split('|||').map((s) => s.trim()).filter((s) => s.length > 0)
+    const primaryCommand = commandSegments[0] || command.command
+    const postCommands = commandSegments.slice(1)
+    const isSshCommand = /^\s*ssh(\s|$)/i.test(primaryCommand)
     if (isMonitoringSource && isSshCommand) {
       console.info('[monitoring][ssh] before_connect', {
         traceId,
         commandName,
         sessionId,
-        commandPreview: command.command.slice(0, 240),
+        commandPreview: primaryCommand.slice(0, 240),
         at: Date.now()
       })
     }
     const existing = terminalMap.get(sessionKey)
     if (existing) {
+      const existingBuffer = terminalBufferMap.get(sessionKey) || ''
       if (isMonitoringSource) {
         monitoringTraceBySessionKey.set(sessionKey, traceId)
       }
@@ -231,7 +710,7 @@ export function registerIpcHandlers(
       return {
         ok: true,
         state: 'running' as const,
-        buffer: terminalBufferMap.get(sessionKey) || ''
+        buffer: existingBuffer
       }
     }
     if (!terminalBufferMap.has(sessionKey)) {
@@ -239,7 +718,7 @@ export function registerIpcHandlers(
     }
     terminalLastExitAtMap.delete(sessionKey)
     const shellExec = resolveShellExecutable()
-    const shellArgs = resolveTerminalArgs(shellExec, command.command)
+    const shellArgs = resolveTerminalArgs(shellExec, primaryCommand)
     let pty: IPty
     try {
       pty = ptySpawn(shellExec, shellArgs, {
@@ -261,7 +740,7 @@ export function registerIpcHandlers(
       pty,
       commandName,
       sessionId,
-      commandLine: command.command,
+      commandLine: resolved.command,
       sessionKind: resolveTerminalSessionKind(sessionId, options?.source)
     })
     if (isMonitoringSource) {
@@ -313,12 +792,68 @@ export function registerIpcHandlers(
       terminalLastExitAtMap.set(sessionKey, Date.now())
       monitoringTraceBySessionKey.delete(sessionKey)
       clearTerminalObserver(sessionKey)
+      if (isDeployTerminalCommand(commandName)) {
+        clearDeployScriptSession(commandName)
+      }
       pruneTerminalBuffers()
-      broadcast('terminal:status', asTerminalStatus(commandName, 'idle', exitCode, sessionId))
+      const maxRestarts = command.maxRestarts ?? 3
+      const shouldRestart =
+        !runtime.manualStop && exitCode !== 0 && Boolean(command.autoRestart) && runtime.restarts < maxRestarts
+      if (shouldRestart) {
+        runtime.restarts += 1
+        const restartMessage = `会话异常退出，正在自动重连（${runtime.restarts}/${maxRestarts}）`
+        appendTerminalAutomationNote(sessionKey, commandName, sessionId, restartMessage)
+        broadcast('terminal:status', asTerminalStatus(commandName, 'idle', exitCode, sessionId, restartMessage, runtime.restarts))
+        runtime.pendingRestartTimer = setTimeout(() => {
+          runtime.pendingRestartTimer = undefined
+          if (runtime.manualStop) return
+          const latest = getConfig().commands.find((item) => item.name === commandName)
+          if (!latest || (latest.mode || 'service') !== 'terminal') return
+          try {
+            startTerminalSession(commandName, runtime.lastStartOptions, { preserveRestarts: true })
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            appendTerminalAutomationNote(sessionKey, commandName, sessionId, `自动重连失败：${message}`)
+          }
+        }, 1500)
+        return
+      }
+      runtime.pendingRestartTimer = undefined
+      const finalMessage = runtime.manualStop
+        ? '会话已手动停止'
+        : exitCode === 0
+          ? '会话已正常退出'
+          : `会话退出码 ${exitCode ?? -1}`
+      appendTerminalAutomationNote(sessionKey, commandName, sessionId, finalMessage)
+      broadcast('terminal:status', asTerminalStatus(commandName, 'idle', exitCode, sessionId, finalMessage, runtime.restarts))
     })
-    return { ok: true, state: 'running' as const, buffer: '' }
+    const startupSteps = (command.terminalStartupSteps || []).filter((step) => step.send.trim().length > 0)
+    if (startupSteps.length > 0) {
+      void runTerminalStartupSteps(sessionKey, commandName, sessionId, startupSteps, traceId).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error)
+        appendTerminalAutomationNote(sessionKey, commandName, sessionId, `启动步骤失败：${message}`)
+        console.warn('[terminal][startup-step] failed', {
+          traceId,
+          sessionKey,
+          commandName,
+          sessionId,
+          error: message,
+          at: Date.now()
+        })
+      })
     }
-  )
+    if (postCommands.length > 0 && startupSteps.length === 0) {
+      void runPostCommands(sessionKey, commandName, sessionId, postCommands, traceId).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error)
+        appendTerminalAutomationNote(sessionKey, commandName, sessionId, `后续命令注入失败：${message}`)
+      })
+    }
+    return { ok: true, state: 'running' as const, buffer: '' }
+  }
+
+  ipcMain.handle('terminal:start', (_e, commandName: string, options?: { source?: string; traceId?: string; sessionId?: string }) => {
+    return startTerminalSession(commandName, options)
+  })
   ipcMain.handle(
     'terminal:input',
     (_e, commandName: string, data: string, options?: { source?: string; traceId?: string; sessionId?: string }) => {
@@ -370,6 +905,7 @@ export function registerIpcHandlers(
   })
 
   const killTerminalSessionBySessionKey = (sessionKey: string): void => {
+    markTerminalManualStop(sessionKey)
     const session = terminalMap.get(sessionKey)
     if (!session) return
     const pty = session.pty
@@ -550,7 +1086,9 @@ export function registerIpcHandlers(
   const MAX_QUERY_OUTPUT_LINES = 2000
   ipcMain.handle('query:execute', (_e, command: string) => {
     runningQuery?.kill('SIGTERM')
-    const child = cpSpawn(command, { shell: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const shellExec = resolveShellExecutable()
+    const shellArgs = resolveServiceArgs(shellExec, command)
+    const child = cpSpawn(shellExec, shellArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
     runningQuery = child
     child.stdout?.on('data', (buf) => {
       const text = String(buf)
@@ -595,12 +1133,14 @@ export function registerIpcHandlers(
   })
 
   const shutdown = async () => {
+    await analyticsStore.shutdown()
     runningQuery?.kill('SIGTERM')
     runningQuery = undefined
     const terminalEntries = [...terminalMap.entries()]
     if (terminalEntries.length === 0) return
     await Promise.allSettled(
       terminalEntries.map(async ([sessionKey, session]) => {
+        markTerminalManualStop(sessionKey)
         const pty = session.pty
         const pid = pty.pid
         try {
@@ -646,9 +1186,11 @@ function asTerminalStatus(
   commandName: string,
   state: 'running' | 'idle',
   exitCode?: number,
-  sessionId?: string
+  sessionId?: string,
+  message?: string,
+  restarts?: number
 ): TerminalStatusPayload {
-  return { commandName, sessionId, state, exitCode }
+  return { commandName, sessionId, state, exitCode, message, restarts }
 }
 
 function resolveTerminalSessionKey(commandName: string, sessionId?: string): string {
@@ -918,6 +1460,217 @@ function extractExecutableName(command: string, fallbackName: string): string {
 
 function shellSingleQuote(input: string): string {
   return input.replace(/'/g, `'\"'\"'`)
+}
+
+function escapeDoubleQuoted(input: string): string {
+  return input.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
+async function resolveMacosAppIconData(
+  appPath: string,
+  appName: string
+): Promise<{ iconDataUrl?: string; iconFilePath?: string }> {
+  try {
+    const iconDir = join(homedir(), '.shell-manage', 'app-icons')
+    await mkdir(iconDir, { recursive: true })
+    const hash = createHash('sha1').update(appPath).digest('hex').slice(0, 12)
+    const iconFileName = `${sanitizeFileName(appName) || 'app'}-${hash}.png`
+    const iconFilePath = join(iconDir, iconFileName)
+    const icnsPath = await resolveIcnsPathFromBundle(appPath, appName)
+    if (icnsPath) {
+      await executeShell(
+        `sips -s format png "${escapeDoubleQuoted(icnsPath)}" --out "${escapeDoubleQuoted(iconFilePath)}" >/dev/null`
+      )
+      const pngBuffer = await readFile(iconFilePath)
+      return {
+        iconFilePath,
+        iconDataUrl: toPngDataUrl(pngBuffer)
+      }
+    }
+
+    const icon = await app.getFileIcon(appPath, { size: 'large' })
+    if (icon.isEmpty()) return {}
+    const pngBuffer = icon.toPNG()
+    if (!pngBuffer || pngBuffer.length === 0) return {}
+    await writeFile(iconFilePath, pngBuffer)
+    return {
+      iconFilePath,
+      iconDataUrl: toPngDataUrl(pngBuffer)
+    }
+  } catch {
+    return {}
+  }
+}
+
+async function resolveIcnsPathFromBundle(appPath: string, appName: string): Promise<string | undefined> {
+  const resourcesDir = join(appPath, 'Contents', 'Resources')
+  const infoPlist = join(appPath, 'Contents', 'Info.plist')
+  const fromPlist = await readIconCandidatesFromPlist(infoPlist)
+  for (const candidate of fromPlist) {
+    const name = extname(candidate).toLowerCase() === '.icns' ? candidate : `${candidate}.icns`
+    const fullPath = join(resourcesDir, name)
+    try {
+      await readFile(fullPath)
+      return fullPath
+    } catch {
+    }
+  }
+  try {
+    const files = await readdir(resourcesDir)
+    const icnsFiles = files.filter((file) => file.toLowerCase().endsWith('.icns'))
+    if (icnsFiles.length === 0) return undefined
+    const byName = icnsFiles.find((file) => file.toLowerCase().includes(appName.toLowerCase()))
+    return join(resourcesDir, byName || icnsFiles[0])
+  } catch {
+    return undefined
+  }
+}
+
+async function readIconCandidatesFromPlist(infoPlistPath: string): Promise<string[]> {
+  try {
+    const jsonText = await executeShell(`plutil -convert json -o - "${escapeDoubleQuoted(infoPlistPath)}"`)
+    const parsed = JSON.parse(jsonText) as {
+      CFBundleIconFile?: unknown
+      CFBundleIconFiles?: unknown
+      CFBundleIcons?: { CFBundlePrimaryIcon?: { CFBundleIconFiles?: unknown } }
+    }
+    const candidates = new Set<string>()
+    const push = (value: unknown) => {
+      if (typeof value !== 'string') return
+      const normalized = value.trim()
+      if (!normalized) return
+      candidates.add(normalized)
+    }
+    push(parsed.CFBundleIconFile)
+    if (Array.isArray(parsed.CFBundleIconFiles)) {
+      parsed.CFBundleIconFiles.forEach((item) => push(item))
+    }
+    const primary = parsed.CFBundleIcons?.CFBundlePrimaryIcon?.CFBundleIconFiles
+    if (Array.isArray(primary)) {
+      primary.forEach((item) => push(item))
+    }
+    return [...candidates]
+  } catch {
+    return []
+  }
+}
+
+function sanitizeFileName(input: string): string {
+  return input.replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '')
+}
+
+function toPngDataUrl(buffer: Buffer): string {
+  return `data:image/png;base64,${buffer.toString('base64')}`
+}
+
+async function resolveWebsiteIconData(
+  pageUrl: string
+): Promise<{ iconDataUrl?: string; iconFilePath?: string; iconSourceUrl?: string }> {
+  const iconDir = join(homedir(), '.shell-manage', 'app-icons')
+  await mkdir(iconDir, { recursive: true })
+  const candidates = await collectWebsiteIconCandidates(pageUrl)
+  for (const iconUrl of candidates) {
+    try {
+      const response = await fetch(iconUrl, { headers: { 'user-agent': 'shell-manage/1.0' } })
+      if (!response.ok) continue
+      const arrayBuffer = await response.arrayBuffer()
+      const buffer = Buffer.from(arrayBuffer)
+      if (!buffer || buffer.length === 0) continue
+      const mime = normalizeImageMimeType(response.headers.get('content-type'), iconUrl, buffer)
+      const ext = extensionByMimeType(mime)
+      const hash = createHash('sha1').update(iconUrl).digest('hex').slice(0, 12)
+      const iconFilePath = join(iconDir, `web-${hash}${ext}`)
+      await writeFile(iconFilePath, buffer)
+      return {
+        iconSourceUrl: iconUrl,
+        iconFilePath,
+        iconDataUrl: `data:${mime};base64,${buffer.toString('base64')}`
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return {}
+}
+
+async function collectWebsiteIconCandidates(pageUrl: string): Promise<string[]> {
+  const set = new Set<string>()
+  const baseUrl = new URL(pageUrl)
+  try {
+    const response = await fetch(pageUrl, { headers: { accept: 'text/html', 'user-agent': 'shell-manage/1.0' } })
+    if (response.ok) {
+      const html = await response.text()
+      const fromHtml = extractIconUrlsFromHtml(html, pageUrl)
+      for (const url of fromHtml) set.add(url)
+    }
+  } catch {
+    // ignore and fallback below
+  }
+  set.add(new URL('/favicon.ico', baseUrl).toString())
+  set.add(new URL('/apple-touch-icon.png', baseUrl).toString())
+  return [...set]
+}
+
+function extractIconUrlsFromHtml(html: string, pageUrl: string): string[] {
+  const results: string[] = []
+  const linkRegex = /<link\b[^>]*>/gi
+  const hrefRegex = /\bhref\s*=\s*["']([^"']+)["']/i
+  const relRegex = /\brel\s*=\s*["']([^"']+)["']/i
+  const typeRegex = /\btype\s*=\s*["']([^"']+)["']/i
+  const matches = html.match(linkRegex) || []
+  for (const linkTag of matches) {
+    const href = hrefRegex.exec(linkTag)?.[1]?.trim()
+    if (!href) continue
+    const rel = relRegex.exec(linkTag)?.[1]?.toLowerCase() || ''
+    const type = typeRegex.exec(linkTag)?.[1]?.toLowerCase() || ''
+    const isIcon = rel.includes('icon') || type.startsWith('image/')
+    if (!isIcon) continue
+    try {
+      results.push(new URL(href, pageUrl).toString())
+    } catch {
+      // ignore invalid href
+    }
+  }
+  return results
+}
+
+function normalizeWebsiteUrl(input: string): string {
+  const withProtocol = /^https?:\/\//i.test(input) ? input : `https://${input}`
+  let url: URL
+  try {
+    url = new URL(withProtocol)
+  } catch {
+    throw new Error(`网站地址不合法：${input}`)
+  }
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    throw new Error('仅支持 http/https 网站地址')
+  }
+  return url.toString()
+}
+
+function normalizeImageMimeType(contentType: string | null, sourceUrl: string, buffer: Buffer): string {
+  const cleanType = (contentType || '').split(';')[0].trim().toLowerCase()
+  if (cleanType.startsWith('image/')) return cleanType
+  const lowered = sourceUrl.toLowerCase()
+  if (lowered.endsWith('.png')) return 'image/png'
+  if (lowered.endsWith('.ico')) return 'image/x-icon'
+  if (lowered.endsWith('.svg')) return 'image/svg+xml'
+  if (lowered.endsWith('.jpg') || lowered.endsWith('.jpeg')) return 'image/jpeg'
+  if (lowered.endsWith('.webp')) return 'image/webp'
+  if (buffer.length >= 8 && buffer[0] === 0x89 && buffer[1] === 0x50) return 'image/png'
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8) return 'image/jpeg'
+  if (buffer.length >= 4 && buffer[0] === 0x00 && buffer[1] === 0x00 && buffer[2] === 0x01 && buffer[3] === 0x00)
+    return 'image/x-icon'
+  return 'image/png'
+}
+
+function extensionByMimeType(mime: string): string {
+  if (mime === 'image/png') return '.png'
+  if (mime === 'image/jpeg') return '.jpg'
+  if (mime === 'image/webp') return '.webp'
+  if (mime === 'image/svg+xml') return '.svg'
+  if (mime === 'image/x-icon') return '.ico'
+  return '.png'
 }
 
 function isPidAlive(pid: number): boolean {

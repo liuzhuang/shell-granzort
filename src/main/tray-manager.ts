@@ -4,6 +4,7 @@ import { join } from 'node:path'
 
 export class TrayManager {
   private tray?: Tray
+  private contextMenu?: Menu
 
   init(options: { onOpen: () => void; onHide: () => void; onQuit: () => void }): void {
     const { onOpen, onHide, onQuit } = options
@@ -16,26 +17,34 @@ export class TrayManager {
     if (process.platform === 'darwin') icon.setTemplateImage(true)
     this.tray = new Tray(icon)
     this.tray.setToolTip(app.getName())
-    this.tray.setContextMenu(
-      Menu.buildFromTemplate([
-        {
-          label: '打开程序',
-          click: onOpen
-        },
-        {
-          label: '隐藏到后台',
-          click: onHide
-        },
-        { type: 'separator' },
-        {
-          label: '完全退出应用',
-          click: onQuit
-        }
-      ])
-    )
+
+    // 右键 / 双指点击 时弹出的菜单：仅保留隐藏与退出。
+    // 注意：不调用 setContextMenu，否则在 macOS 上左键单击也会弹菜单，
+    // 无法实现"左键直接打开程序"的交互。
+    this.contextMenu = Menu.buildFromTemplate([
+      {
+        label: '隐藏到后台',
+        click: onHide
+      },
+      { type: 'separator' },
+      {
+        label: '完全退出应用',
+        click: onQuit
+      }
+    ])
+
+    this.tray.on('click', () => {
+      onOpen()
+    })
 
     this.tray.on('double-click', () => {
       onOpen()
+    })
+
+    this.tray.on('right-click', () => {
+      if (this.tray && this.contextMenu) {
+        this.tray.popUpContextMenu(this.contextMenu)
+      }
     })
   }
 }

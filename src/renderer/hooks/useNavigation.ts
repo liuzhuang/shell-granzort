@@ -1,6 +1,17 @@
 import { useState } from 'react'
 
-export type AppPage = 'home' | 'log' | 'query' | 'editor' | 'terminal' | 'dashboard' | 'monitoring'
+export type AppPage =
+  | 'home'
+  | 'log'
+  | 'multiLog'
+  | 'query'
+  | 'editor'
+  | 'ssh-keys'
+  | 'collaboration'
+  | 'terminal'
+  | 'dashboard'
+  | 'monitoring'
+  | 'analytics'
 
 export function useNavigation() {
   const [page, setPage] = useState<AppPage>('home')
